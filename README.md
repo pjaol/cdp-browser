@@ -2,6 +2,19 @@
 
 A lightweight Python client for Chrome DevTools Protocol (CDP) on ARM64 architecture.
 
+## Why?
+While developing tech, the standard it's working on my laptop issue hit.
+I was moving to a docker compose setup and my chrome integrations were failing and I discovered that chrome was no longer support on Linux ARM64 or aarch64. 
+Selenium which was driving the interactions, was also built only for x86_64, so even if I got a chrome docker instance working like browserless or puppettier they would still run afowl with selenium. 
+
+CDP (Chrome Developer Protocol) seemed like the way to go, it's basically the DevTools in chrome listening on a websocket but with additonal functionality for browser control.
+
+There are a few libraries out that implement CDP, however again I could not get them to work
+some required a local instance meaning if you got a working docker chrome, your application would also work in that docker instance
+Others were automated to transpile the CDP protocol and are simply not working. 
+
+Hence regrettably we had to do our own.
+
 ## Features
 
 - Direct Chrome DevTools Protocol (CDP) communication
@@ -97,6 +110,8 @@ poetry install
 ### Building the Docker Image
 
 The Docker image is based on `browserless/chrome:latest` for ARM64 architecture, which provides a headless Chrome browser with the Chrome DevTools Protocol enabled.
+Any Chrome instance will work, just take a look at `docker/entrypoint.sh` to see how we start chrome.
+
 
 ```bash
 docker build -t cdp-browser -f docker/Dockerfile .
