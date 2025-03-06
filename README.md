@@ -107,28 +107,30 @@ poetry install
 
 ## Docker Usage
 
-### Building the Docker Image
+### Recommended Approach: Using browserless/chrome
 
-The Docker image is based on `browserless/chrome:latest` for ARM64 architecture, which provides a headless Chrome browser with the Chrome DevTools Protocol enabled.
-Any Chrome instance will work, just take a look at `docker/entrypoint.sh` to see how we start chrome.
-
+The most reliable way to run Chrome with CDP support is to use the browserless/chrome image directly:
 
 ```bash
+# Run browserless/chrome
+docker run -d -p 9222:3000 --name browserless-chrome browserless/chrome:latest
+```
+
+This image is specifically designed to expose the Chrome DevTools Protocol and works reliably with our CDP Browser client.
+
+### Alternative: Building a Custom Image
+
+If you need a custom image with additional dependencies, you can build one using our Dockerfile:
+
+```bash
+# Build the custom image
 docker build -t cdp-browser -f docker/Dockerfile .
-```
 
-### Running the Docker Container
-
-```bash
-# Run with default settings
+# Run the custom image
 docker run -d -p 9222:9222 --name cdp-browser-container cdp-browser
-
-# Run with headless mode disabled
-docker run -d -p 9222:9222 -e HEADLESS=false --name cdp-browser-container cdp-browser
-
-# Run with proxy
-docker run -d -p 9222:9222 -e PROXY_SERVER=http://host:port --name cdp-browser-container cdp-browser
 ```
+
+Note: The custom image may require additional configuration to work correctly with the CDP Browser client.
 
 ### How CDP Browser Interacts with Docker
 
@@ -194,6 +196,31 @@ async def main():
 asyncio.run(main())
 ```
 
+### Using the Browserless API
+
+For more reliable operation, you can use the browserless API directly:
+
+```python
+import asyncio
+import aiohttp
+from urllib.parse import urljoin
+
+async def take_screenshot(url):
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "http://localhost:9222/screenshot",
+            json={"url": url, "options": {"fullPage": True}}
+        ) as response:
+            return await response.read()
+
+async def main():
+    screenshot = await take_screenshot("https://example.com")
+    with open("screenshot.png", "wb") as f:
+        f.write(screenshot)
+
+asyncio.run(main())
+```
+
 ### Command Line Interface
 
 ```bash
@@ -231,6 +258,10 @@ CHROME_AVAILABLE=1 poetry run pytest
 2. **Empty Response**: Check if Chrome is binding to the correct address inside the container.
 
 3. **Protocol Errors**: Verify that the Chrome version in the container supports the CDP commands you're using.
+
+4. **Port Conflicts**: If port 9222 is already in use, you can use a different port by changing the port mapping in the Docker run command.
+
+5. **ARM64 Compatibility**: If you're running on ARM64 architecture, make sure to use the ARM64 version of the browserless/chrome image.
 
 ## License
 
