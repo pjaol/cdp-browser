@@ -4,6 +4,7 @@ Form interaction example for CDP Browser.
 import asyncio
 import os
 import sys
+import logging
 
 # Add parent directory to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -18,10 +19,10 @@ async def main():
     Form interaction example.
     """
     # Configure logging
-    configure_logging(level=20)  # INFO level
+    configure_logging(level=logging.INFO)
     
     # Create browser instance
-    browser = Browser("localhost", 9222)
+    browser = Browser("localhost", 9223)
     
     try:
         # Connect to browser
@@ -32,57 +33,44 @@ async def main():
         print("Creating new page...")
         page = await browser.new_page()
         
-        # Create input handler
-        input_handler = Input(page)
+        # Navigate to GitHub login page
+        await page.navigate("https://github.com")
         
-        # Navigate to a search engine
-        url = "https://duckduckgo.com/"
-        print(f"Navigating to {url}...")
-        await page.navigate(url)
+        # Print page title
+        print(f"Page title: {page.title}")
         
-        # Wait for page to load
+        # Take screenshot
+        screenshot_data = await page.screenshot()
+        with open("github.com_screenshot.png", "wb") as f:
+            f.write(screenshot_data)
+        print(f"Screenshot saved to: github.com_screenshot.png")
+        
+        # Fill a search form
+        # First, click on the search button to open the search box
+        search_button = "button[aria-label='Toggle navigation']"
+        await browser.input.click(search_button)
+        
+        # Wait a bit for the search box to appear
+        await asyncio.sleep(1)
+        
+        # Now type in the search box
+        search_input = "input[name='q']"
+        await browser.input.type(search_input, "python")
+        
+        # Press Enter to submit the search
+        await browser.input.press("Enter")
+        
+        # Wait for the search results to load
         await asyncio.sleep(2)
         
-        # Type in search box
-        print("Typing in search box...")
-        search_query = "Python CDP Browser"
-        await input_handler.type("input[name='q']", search_query)
+        # Print the new page title
+        print(f"Search results page title: {page.title}")
         
-        # Take screenshot before search
-        print("Taking screenshot before search...")
+        # Take screenshot of search results
         screenshot_data = await page.screenshot()
-        with open("search_before.png", "wb") as f:
+        with open("github_search_results.png", "wb") as f:
             f.write(screenshot_data)
-        
-        # Click search button
-        print("Clicking search button...")
-        await input_handler.click("button[type='submit']")
-        
-        # Wait for results to load
-        print("Waiting for results to load...")
-        await asyncio.sleep(3)
-        
-        # Take screenshot after search
-        print("Taking screenshot after search...")
-        screenshot_data = await page.screenshot()
-        with open("search_after.png", "wb") as f:
-            f.write(screenshot_data)
-        
-        # Get search results
-        print("Getting search results...")
-        result = await page.evaluate("""
-            Array.from(document.querySelectorAll('.result__title')).map(el => el.textContent.trim())
-        """)
-        
-        # Print search results
-        search_results = result.get("result", {}).get("value", [])
-        print(f"Found {len(search_results)} search results:")
-        for i, title in enumerate(search_results[:5], 1):
-            print(f"{i}. {title}")
-        
-        # Close page
-        print("Closing page...")
-        await browser.close_page(page.target_id)
+        print(f"Screenshot saved to: github_search_results.png")
     except Exception as e:
         print(f"Error: {str(e)}")
     finally:

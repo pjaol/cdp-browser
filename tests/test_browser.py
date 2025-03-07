@@ -16,7 +16,7 @@ from cdp_browser.core.exceptions import CDPConnectionError
 @pytest.mark.asyncio
 async def test_browser_connect():
     """Test browser connection."""
-    browser = Browser("localhost", 9222)
+    browser = Browser("localhost", 9223)
     
     try:
         await browser.connect()
@@ -35,7 +35,7 @@ async def test_browser_connect():
 @pytest.mark.asyncio
 async def test_browser_get_version():
     """Test getting browser version."""
-    browser = Browser("localhost", 9222)
+    browser = Browser("localhost", 9223)
     
     try:
         await browser.connect()
@@ -55,7 +55,7 @@ async def test_browser_get_version():
 @pytest.mark.asyncio
 async def test_browser_new_page():
     """Test creating a new page."""
-    browser = Browser("localhost", 9222)
+    browser = Browser("localhost", 9223)
     
     try:
         await browser.connect()
@@ -79,7 +79,7 @@ async def test_browser_new_page():
 @pytest.mark.asyncio
 async def test_browser_navigate():
     """Test navigating to a URL."""
-    browser = Browser("localhost", 9222)
+    browser = Browser("localhost", 9223)
     
     try:
         await browser.connect()

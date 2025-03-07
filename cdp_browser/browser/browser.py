@@ -23,13 +23,13 @@ class Browser:
     Manages a Chrome browser instance via CDP.
     """
 
-    def __init__(self, host: str = "localhost", port: int = 9222):
+    def __init__(self, host: str = "localhost", port: int = 9223):
         """
         Initialize a Browser instance.
 
         Args:
             host: Chrome DevTools host
-            port: Chrome DevTools port
+            port: Chrome DevTools port (default: 9223 for the proxy)
         """
         self.host = host
         self.port = port

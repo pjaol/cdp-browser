@@ -4,6 +4,7 @@ Simple navigation example for CDP Browser.
 import asyncio
 import os
 import sys
+import logging
 
 # Add parent directory to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -17,10 +18,10 @@ async def main():
     Simple navigation example.
     """
     # Configure logging
-    configure_logging(level=20)  # INFO level
+    configure_logging(level=logging.INFO)
     
     # Create browser instance
-    browser = Browser("localhost", 9222)
+    browser = Browser("localhost", 9223)
     
     try:
         # Connect to browser
