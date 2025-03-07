@@ -7,14 +7,14 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     python3-venv \
     curl \
-    socat \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Poetry
 RUN curl -sSL https://install.python-poetry.org | python3 -
 ENV PATH="/root/.local/bin:$PATH"
 
-# Set up working directory
+# Create a directory for our Python application
+RUN mkdir -p /app
 WORKDIR /app
 
 # Copy project files
@@ -27,11 +27,11 @@ RUN poetry config virtualenvs.create false \
 # Copy the rest of the application
 COPY . .
 
-# Expose port for Chrome DevTools Protocol
-EXPOSE 9222
+# Expose browserless port
+EXPOSE 3000
 
-# Create entrypoint script
-COPY docker/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+# Return to the original working directory
+WORKDIR /usr/src/app
 
-ENTRYPOINT ["/entrypoint.sh"] 
+# Use the default CMD from browserless/chrome
+CMD ["./start.sh"] 
