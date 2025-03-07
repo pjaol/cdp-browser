@@ -19,6 +19,16 @@ class CDPTimeoutError(CDPError):
     pass
 
 
+class CDPNavigationError(CDPError):
+    """Exception raised for navigation errors."""
+    pass
+
+
+class CDPEvaluationError(CDPError):
+    """Exception raised for JavaScript evaluation errors."""
+    pass
+
+
 class CDPProtocolError(CDPError):
     """Exception raised for CDP protocol errors."""
     pass
