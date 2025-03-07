@@ -50,7 +50,11 @@ class Page:
         Attach to the page target.
         """
         if not self.ws_url:
-            raise CDPError("WebSocket URL not found in target info")
+            # If no WebSocket URL is provided, try to construct it
+            if self.browser.is_browserless:
+                self.ws_url = f"ws://{self.browser.host}:{self.browser.port}/devtools/page/{self.target_id}"
+            else:
+                raise CDPError("WebSocket URL not found in target info")
         
         # Create a new connection to the page
         self.connection = aiohttp.ClientSession()
@@ -201,77 +205,96 @@ class Page:
             CDPTimeoutError: If navigation times out
             CDPNavigationError: If navigation fails
         """
-        if not self.attached:
-            raise CDPError("Not attached to page")
-        
-        try:
-            # Navigate to URL
-            async with self.connection.ws_connect(self.ws_url) as ws:
-                # Send navigate command
-                await ws.send_json({
-                    "id": 1,
-                    "method": "Page.navigate",
-                    "params": {"url": url}
-                })
+        if self.browser.is_browserless:
+            # For browserless, we'll use the direct API
+            try:
+                content = await self.browser.get_content(url)
+                self.url = url
                 
-                # Wait for response
-                navigation_complete = False
-                load_event_fired = False
-                dom_content_loaded = False
+                # Try to extract title from content
+                title_match = re.search(r"<title>(.*?)</title>", content)
+                if title_match:
+                    self.title = title_match.group(1)
+                else:
+                    self.title = url
                 
-                start_time = asyncio.get_event_loop().time()
-                
-                while asyncio.get_event_loop().time() - start_time < timeout:
-                    async for msg in ws:
-                        if msg.type == aiohttp.WSMsgType.TEXT:
-                            data = json.loads(msg.data)
-                            
-                            # Check for navigation response
-                            if data.get("id") == 1:
-                                if "error" in data:
-                                    raise CDPNavigationError(f"Navigation failed: {data['error']}")
-                                navigation_complete = True
-                            
-                            # Check for load event
-                            if data.get("method") == "Page.loadEventFired":
-                                load_event_fired = True
-                            
-                            # Check for DOMContentLoaded event
-                            if data.get("method") == "Page.domContentEventFired":
-                                dom_content_loaded = True
-                            
-                            # Check if we're done based on wait_until
-                            if navigation_complete:
-                                if wait_until == "load" and load_event_fired:
-                                    break
-                                elif wait_until == "domcontentloaded" and dom_content_loaded:
-                                    break
-                                elif wait_until == "networkidle":
-                                    # For networkidle, we'll just wait a bit after navigation
-                                    await asyncio.sleep(0.5)
-                                    break
-                                elif wait_until is None:
-                                    break
+                logger.info(f"Navigated to: {url}")
+            except Exception as e:
+                logger.error(f"Error navigating to {url}: {str(e)}")
+                raise CDPNavigationError(f"Failed to navigate to {url}: {str(e)}")
+        else:
+            # For regular Chrome, use CDP
+            if not self.attached:
+                raise CDPError("Not attached to page")
+            
+            try:
+                # Navigate to URL
+                async with self.connection.ws_connect(self.ws_url) as ws:
+                    # Send navigate command
+                    await ws.send_json({
+                        "id": 1,
+                        "method": "Page.navigate",
+                        "params": {"url": url}
+                    })
+                    
+                    # Wait for response
+                    navigation_complete = False
+                    load_event_fired = False
+                    dom_content_loaded = False
+                    
+                    start_time = asyncio.get_event_loop().time()
+                    
+                    while asyncio.get_event_loop().time() - start_time < timeout:
+                        async for msg in ws:
+                            if msg.type == aiohttp.WSMsgType.TEXT:
+                                data = json.loads(msg.data)
+                                
+                                # Check for navigation response
+                                if data.get("id") == 1:
+                                    if "error" in data:
+                                        raise CDPNavigationError(f"Navigation failed: {data['error']}")
+                                    navigation_complete = True
+                                
+                                # Check for load event
+                                if data.get("method") == "Page.loadEventFired":
+                                    load_event_fired = True
+                                
+                                # Check for DOMContentLoaded event
+                                if data.get("method") == "Page.domContentEventFired":
+                                    dom_content_loaded = True
+                                
+                                # Check if we're done based on wait_until
+                                if navigation_complete:
+                                    if wait_until == "load" and load_event_fired:
+                                        break
+                                    elif wait_until == "domcontentloaded" and dom_content_loaded:
+                                        break
+                                    elif wait_until == "networkidle":
+                                        # For networkidle, we'll just wait a bit after navigation
+                                        await asyncio.sleep(0.5)
+                                        break
+                                    elif wait_until is None:
+                                        break
                         
-                        # Check if we've waited long enough
-                        if asyncio.get_event_loop().time() - start_time >= timeout:
-                            raise CDPTimeoutError(f"Navigation to {url} timed out after {timeout}s")
-            
-            # Update page info
-            self.url = url
-            
-            # Get page title
-            result = await self.evaluate("document.title")
-            self.title = result
-            
-            logger.info(f"Navigated to: {url}")
-        except CDPTimeoutError:
-            raise
-        except CDPNavigationError:
-            raise
-        except Exception as e:
-            logger.error(f"Error navigating to {url}: {str(e)}")
-            raise CDPError(f"Failed to navigate to {url}: {str(e)}")
+                            # Check if we've waited long enough
+                            if asyncio.get_event_loop().time() - start_time >= timeout:
+                                raise CDPTimeoutError(f"Navigation to {url} timed out after {timeout}s")
+                
+                # Update page info
+                self.url = url
+                
+                # Get page title
+                result = await self.evaluate("document.title")
+                self.title = result
+                
+                logger.info(f"Navigated to: {url}")
+            except CDPTimeoutError:
+                raise
+            except CDPNavigationError:
+                raise
+            except Exception as e:
+                logger.error(f"Error navigating to {url}: {str(e)}")
+                raise CDPError(f"Failed to navigate to {url}: {str(e)}")
 
     async def reload(self, ignore_cache: bool = False, timeout: int = 30) -> None:
         """
@@ -421,37 +444,48 @@ class Page:
         Returns:
             Result of the evaluation
         """
-        if not self.attached:
-            raise CDPError("Not attached to page")
-        
-        try:
-            async with self.connection.ws_connect(self.ws_url) as ws:
-                # Send evaluate command
-                await ws.send_json({
-                    "id": 1,
-                    "method": "Runtime.evaluate",
-                    "params": {
-                        "expression": expression,
-                        "returnByValue": return_by_value,
-                        "awaitPromise": await_promise
-                    }
-                })
-                
-                # Wait for response
-                async for msg in ws:
-                    if msg.type == aiohttp.WSMsgType.TEXT:
-                        data = json.loads(msg.data)
-                        if data.get("id") == 1:
-                            if "result" in data:
-                                result = data["result"]
-                                if "result" in result:
-                                    return result["result"].get("value")
-                                return result
-                            elif "error" in data:
-                                raise CDPError(f"Evaluation error: {data['error']}")
-        except Exception as e:
-            logger.error(f"Error evaluating expression: {str(e)}")
-            raise CDPError(f"Failed to evaluate expression: {str(e)}")
+        if self.browser.is_browserless:
+            # For browserless, we'll use the /function endpoint
+            try:
+                function = f"async ({ page }) => {{ return {expression}; }}"
+                result = await self.browser.execute_function(self.url, function)
+                return result
+            except Exception as e:
+                logger.error(f"Error evaluating expression: {str(e)}")
+                raise CDPError(f"Failed to evaluate expression: {str(e)}")
+        else:
+            # For regular Chrome, use CDP
+            if not self.attached:
+                raise CDPError("Not attached to page")
+            
+            try:
+                async with self.connection.ws_connect(self.ws_url) as ws:
+                    # Send evaluate command
+                    await ws.send_json({
+                        "id": 1,
+                        "method": "Runtime.evaluate",
+                        "params": {
+                            "expression": expression,
+                            "returnByValue": return_by_value,
+                            "awaitPromise": await_promise
+                        }
+                    })
+                    
+                    # Wait for response
+                    async for msg in ws:
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            data = json.loads(msg.data)
+                            if data.get("id") == 1:
+                                if "result" in data:
+                                    result = data["result"]
+                                    if "result" in result:
+                                        return result["result"].get("value")
+                                    return result
+                                elif "error" in data:
+                                    raise CDPError(f"Evaluation error: {data['error']}")
+            except Exception as e:
+                logger.error(f"Error evaluating expression: {str(e)}")
+                raise CDPError(f"Failed to evaluate expression: {str(e)}")
 
     async def wait_for_selector(self, selector: str, timeout: int = 30, visible: bool = False) -> bool:
         """
@@ -575,95 +609,106 @@ class Page:
         Returns:
             Screenshot as bytes
         """
-        if not self.attached:
-            raise CDPError("Not attached to page")
-        
-        # Validate format
-        if format not in ["png", "jpeg"]:
-            raise ValueError("Format must be 'png' or 'jpeg'")
-        
-        try:
-            async with self.connection.ws_connect(self.ws_url) as ws:
-                if full_page:
-                    # Get page dimensions
-                    await ws.send_json({
-                        "id": 1,
-                        "method": "Runtime.evaluate",
-                        "params": {
-                            "expression": """
-                            ({
-                                width: Math.max(document.body.scrollWidth, document.documentElement.scrollWidth),
-                                height: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight),
-                                deviceScaleFactor: window.devicePixelRatio || 1,
-                                mobile: false
-                            })
-                            """,
-                            "returnByValue": True
-                        }
-                    })
-                    
-                    # Wait for dimensions response
-                    dimensions = None
-                    async for msg in ws:
-                        if msg.type == aiohttp.WSMsgType.TEXT:
-                            data = json.loads(msg.data)
-                            if data.get("id") == 1:
-                                if "result" in data and "result" in data["result"]:
-                                    dimensions = data["result"]["result"].get("value", {})
-                                break
-                    
-                    if dimensions:
-                        # Set viewport to full page size
+        if self.browser.is_browserless:
+            # For browserless, we'll use the /screenshot endpoint
+            options = {
+                "fullPage": full_page,
+                "type": format,
+                "quality": quality
+            }
+            
+            return await self.browser.take_screenshot(self.url, options)
+        else:
+            # For regular Chrome, use CDP
+            if not self.attached:
+                raise CDPError("Not attached to page")
+            
+            # Validate format
+            if format not in ["png", "jpeg"]:
+                raise ValueError("Format must be 'png' or 'jpeg'")
+            
+            try:
+                async with self.connection.ws_connect(self.ws_url) as ws:
+                    if full_page:
+                        # Get page dimensions
                         await ws.send_json({
-                            "id": 2,
-                            "method": "Emulation.setDeviceMetricsOverride",
+                            "id": 1,
+                            "method": "Runtime.evaluate",
                             "params": {
-                                "width": dimensions.get("width", 800),
-                                "height": dimensions.get("height", 600),
-                                "deviceScaleFactor": 1,
-                                "mobile": False
+                                "expression": """
+                                ({
+                                    width: Math.max(document.body.scrollWidth, document.documentElement.scrollWidth),
+                                    height: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight),
+                                    deviceScaleFactor: window.devicePixelRatio || 1,
+                                    mobile: false
+                                })
+                                """,
+                                "returnByValue": True
                             }
                         })
                         
-                        # Wait for viewport response
+                        # Wait for dimensions response
+                        dimensions = None
                         async for msg in ws:
                             if msg.type == aiohttp.WSMsgType.TEXT:
                                 data = json.loads(msg.data)
-                                if data.get("id") == 2:
+                                if data.get("id") == 1:
+                                    if "result" in data and "result" in data["result"]:
+                                        dimensions = data["result"]["result"].get("value", {})
                                     break
-                
-                # Take screenshot
-                await ws.send_json({
-                    "id": 3,
-                    "method": "Page.captureScreenshot",
-                    "params": {
-                        "format": format,
-                        "quality": quality
-                    }
-                })
-                
-                # Wait for screenshot response
-                async for msg in ws:
-                    if msg.type == aiohttp.WSMsgType.TEXT:
-                        data = json.loads(msg.data)
-                        if data.get("id") == 3:
-                            if "result" in data and "data" in data["result"]:
-                                screenshot_data = data["result"]["data"]
-                                return base64.b64decode(screenshot_data)
-                            elif "error" in data:
-                                raise CDPError(f"Screenshot error: {data['error']}")
-                
-                if full_page:
-                    # Reset viewport
+                        
+                        if dimensions:
+                            # Set viewport to full page size
+                            await ws.send_json({
+                                "id": 2,
+                                "method": "Emulation.setDeviceMetricsOverride",
+                                "params": {
+                                    "width": dimensions.get("width", 800),
+                                    "height": dimensions.get("height", 600),
+                                    "deviceScaleFactor": 1,
+                                    "mobile": False
+                                }
+                            })
+                            
+                            # Wait for viewport response
+                            async for msg in ws:
+                                if msg.type == aiohttp.WSMsgType.TEXT:
+                                    data = json.loads(msg.data)
+                                    if data.get("id") == 2:
+                                        break
+                    
+                    # Take screenshot
                     await ws.send_json({
-                        "id": 4,
-                        "method": "Emulation.clearDeviceMetricsOverride"
+                        "id": 3,
+                        "method": "Page.captureScreenshot",
+                        "params": {
+                            "format": format,
+                            "quality": quality
+                        }
                     })
-        except Exception as e:
-            logger.error(f"Error taking screenshot: {str(e)}")
-            raise CDPError(f"Failed to take screenshot: {str(e)}")
-        
-        raise CDPError("Failed to take screenshot: No data received")
+                    
+                    # Wait for screenshot response
+                    async for msg in ws:
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            data = json.loads(msg.data)
+                            if data.get("id") == 3:
+                                if "result" in data and "data" in data["result"]:
+                                    screenshot_data = data["result"]["data"]
+                                    return base64.b64decode(screenshot_data)
+                                elif "error" in data:
+                                    raise CDPError(f"Screenshot error: {data['error']}")
+                    
+                    if full_page:
+                        # Reset viewport
+                        await ws.send_json({
+                            "id": 4,
+                            "method": "Emulation.clearDeviceMetricsOverride"
+                        })
+            except Exception as e:
+                logger.error(f"Error taking screenshot: {str(e)}")
+                raise CDPError(f"Failed to take screenshot: {str(e)}")
+            
+            raise CDPError("Failed to take screenshot: No data received")
 
     async def get_cookies(self) -> List[Dict[str, Any]]:
         """
@@ -706,11 +751,16 @@ class Page:
         Returns:
             HTML content as string
         """
-        if not self.attached:
-            raise CDPError("Not attached to page")
-        
-        result = await self.evaluate("document.documentElement.outerHTML")
-        return result
+        if self.browser.is_browserless:
+            # For browserless, we'll use the /content endpoint
+            return await self.browser.get_content(self.url)
+        else:
+            # For regular Chrome, use CDP
+            if not self.attached:
+                raise CDPError("Not attached to page")
+            
+            result = await self.evaluate("document.documentElement.outerHTML")
+            return result
 
     async def get_text(self) -> str:
         """

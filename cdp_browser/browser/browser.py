@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import os
-from typing import Dict, List, Optional, Union, Callable
+from typing import Dict, List, Optional, Union, Callable, Any
 
 import aiohttp
 
@@ -40,6 +40,7 @@ class Browser:
         self._target_created_listeners = []
         self._target_destroyed_listeners = []
         self._is_listening_for_targets = False
+        self.is_browserless = True  # Assume we're using browserless by default
 
     async def connect(self) -> None:
         """
@@ -65,7 +66,7 @@ class Browser:
             
             # Create pages for each target
             for target in targets:
-                target_id = target.get("id")
+                target_id = target.get("id") or target.get("targetId")
                 target_type = target.get("type")
                 
                 if target_type == "page" and target_id:
@@ -118,7 +119,8 @@ class Browser:
                     ws_url = data.get("webSocketDebuggerUrl")
                     
                     if not ws_url:
-                        raise CDPConnectionError("WebSocket URL not found in response")
+                        # If no webSocketDebuggerUrl is provided, construct it
+                        ws_url = f"ws://{self.host}:{self.port}"
                     
                     return ws_url
         except aiohttp.ClientError as e:
@@ -165,7 +167,21 @@ class Browser:
         if not self.connection:
             raise CDPConnectionError("Not connected to browser")
         
-        return await self.connection.send_command("Browser.getVersion")
+        try:
+            return await self.connection.send_command("Browser.getVersion")
+        except Exception:
+            # If Browser.getVersion fails, try to get version from /json/version
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(f"{self.debug_url}/json/version") as response:
+                        if response.status != 200:
+                            raise CDPConnectionError(
+                                f"Failed to get browser version: {response.status}"
+                            )
+                        
+                        return await response.json()
+            except aiohttp.ClientError as e:
+                raise CDPConnectionError(f"Failed to get browser version: {str(e)}")
 
     async def get_targets(self) -> List[Dict[str, str]]:
         """
@@ -193,31 +209,60 @@ class Browser:
         Returns:
             Page object for the new page
         """
-        if not self.connection:
-            raise CDPConnectionError("Not connected to browser")
-        
-        # Create a new target (page)
-        result = await self.connection.send_command(
-            "Target.createTarget", {"url": "about:blank"}
-        )
-        
-        target_id = result.get("targetId")
-        if not target_id:
-            raise CDPError("Failed to create new page")
-        
-        # Get target info
-        targets = await self.get_targets()
-        target = next((t for t in targets if t.get("id") == target_id), None)
-        
-        if not target:
-            raise CDPError("Failed to get target info for new page")
-        
-        # Create a page for this target
-        page = Page(self, target_id, target)
-        self.pages[target_id] = page
-        self.targets[target_id] = target
-        
-        return page
+        if self.is_browserless:
+            # For browserless, we'll use the /session endpoint
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(f"{self.debug_url}/session") as response:
+                        if response.status != 200:
+                            raise CDPError(f"Failed to create new page: {response.status}")
+                        
+                        # Get the new page information
+                        targets = await self.get_targets()
+                        
+                        # Find the new target (usually the last one)
+                        if targets:
+                            target = targets[-1]
+                            target_id = target.get("id") or target.get("targetId")
+                            
+                            if target_id:
+                                # Create a page for this target
+                                page = Page(self, target_id, target)
+                                self.pages[target_id] = page
+                                self.targets[target_id] = target
+                                
+                                return page
+                        
+                        raise CDPError("Failed to get target info for new page")
+            except aiohttp.ClientError as e:
+                raise CDPError(f"Failed to create new page: {str(e)}")
+        else:
+            # For regular Chrome, use Target.createTarget
+            if not self.connection:
+                raise CDPConnectionError("Not connected to browser")
+            
+            # Create a new target (page)
+            result = await self.connection.send_command(
+                "Target.createTarget", {"url": "about:blank"}
+            )
+            
+            target_id = result.get("targetId")
+            if not target_id:
+                raise CDPError("Failed to create new page")
+            
+            # Get target info
+            targets = await self.get_targets()
+            target = next((t for t in targets if t.get("id") == target_id or t.get("targetId") == target_id), None)
+            
+            if not target:
+                raise CDPError("Failed to get target info for new page")
+            
+            # Create a page for this target
+            page = Page(self, target_id, target)
+            self.pages[target_id] = page
+            self.targets[target_id] = target
+            
+            return page
 
     async def close_page(self, target_id: str) -> None:
         """
@@ -226,17 +271,9 @@ class Browser:
         Args:
             target_id: Target ID of the page to close
         """
-        if not self.connection:
-            raise CDPConnectionError("Not connected to browser")
-        
         if target_id in self.pages:
             page = self.pages[target_id]
             await page.detach()
-            
-            # Close the target
-            await self.connection.send_command(
-                "Target.closeTarget", {"targetId": target_id}
-            )
             
             # Remove from pages and targets
             del self.pages[target_id]
@@ -328,4 +365,120 @@ class Browser:
         
         await self.connection.send_command(
             "Target.activateTarget", {"targetId": target_id}
-        ) 
+        )
+
+    async def take_screenshot(self, url: str, options: Optional[Dict[str, Any]] = None) -> bytes:
+        """
+        Take a screenshot of a URL using browserless API.
+
+        Args:
+            url: URL to take a screenshot of
+            options: Screenshot options
+
+        Returns:
+            Screenshot as bytes
+        """
+        if not self.is_browserless:
+            raise CDPError("This method is only available with browserless")
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Use the /screenshot endpoint
+                screenshot_url = f"{self.debug_url}/screenshot"
+                
+                # Prepare the payload
+                payload = {
+                    "url": url,
+                    "options": options or {
+                        "fullPage": True,
+                        "type": "png"
+                    }
+                }
+                
+                # Send the request
+                async with session.post(screenshot_url, json=payload) as response:
+                    if response.status != 200:
+                        raise CDPError(f"Failed to take screenshot: {response.status}")
+                    
+                    # Get the screenshot data
+                    return await response.read()
+        except Exception as e:
+            raise CDPError(f"Failed to take screenshot: {str(e)}")
+
+    async def get_content(self, url: str, options: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Get the content of a URL using browserless API.
+
+        Args:
+            url: URL to get content from
+            options: Content options
+
+        Returns:
+            Content as string
+        """
+        if not self.is_browserless:
+            raise CDPError("This method is only available with browserless")
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Use the /content endpoint
+                content_url = f"{self.debug_url}/content"
+                
+                # Prepare the payload
+                payload = {
+                    "url": url
+                }
+                
+                if options:
+                    payload["options"] = options
+                
+                # Send the request
+                async with session.post(content_url, json=payload) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        raise CDPError(f"Failed to get content: {response.status} - {error_text}")
+                    
+                    # Get the content
+                    return await response.text()
+        except Exception as e:
+            raise CDPError(f"Failed to get content: {str(e)}")
+
+    async def execute_function(self, url: str, function: str, options: Optional[Dict[str, Any]] = None) -> Any:
+        """
+        Execute a function on a URL using browserless API.
+
+        Args:
+            url: URL to execute the function on
+            function: JavaScript function to execute
+            options: Function options
+
+        Returns:
+            Result of the function
+        """
+        if not self.is_browserless:
+            raise CDPError("This method is only available with browserless")
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Use the /function endpoint
+                function_url = f"{self.debug_url}/function"
+                
+                # Prepare the payload
+                payload = {
+                    "code": function
+                }
+                
+                # Add options if provided
+                if options:
+                    payload.update(options)
+                
+                # Send the request
+                async with session.post(function_url, json=payload) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        raise CDPError(f"Failed to execute function: {response.status} - {error_text}")
+                    
+                    # Get the result
+                    return await response.json()
+        except Exception as e:
+            raise CDPError(f"Failed to execute function: {str(e)}") 
