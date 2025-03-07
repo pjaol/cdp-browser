@@ -26,6 +26,7 @@ Hence regrettably we had to do our own.
 - JavaScript execution
 - Screenshot capture
 - Cookie management
+- WebSocket proxy for remote connections
 
 ## Architecture Overview
 
@@ -60,16 +61,16 @@ For ARM64 compatibility and isolation, we use Docker to run Chrome:
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### Communication Flow
+### Communication Flow with WebSocket Proxy
 
 ```
-┌──────────┐     ┌───────────┐     ┌──────────┐     ┌──────────┐
-│          │     │           │     │          │     │          │
-│  Python  │────▶│  CDP      │────▶│ Chrome   │────▶│ Webpage  │
-│  Client  │     │  Protocol │     │ Browser  │     │          │
-│          │◀────│           │◀────│          │◀────│          │
-└──────────┘     └───────────┘     └──────────┘     └──────────┘
-    Action         WebSocket        Execution        Rendering
+┌──────────┐     ┌───────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
+│          │     │           │     │          │     │          │     │          │
+│  Python  │────▶│  CDP      │────▶│ WebSocket│────▶│ Chrome   │────▶│ Webpage  │
+│  Client  │     │  Protocol │     │  Proxy   │     │ Browser  │     │          │
+│          │◀────│           │◀────│          │◀────│          │◀────│          │
+└──────────┘     └───────────┘     └──────────┘     └──────────┘     └──────────┘
+    Action         WebSocket        Forwarding       Execution        Rendering
 ```
 
 ## Why Docker?
@@ -107,9 +108,43 @@ poetry install
 
 ## Docker Usage
 
-### Recommended Approach: Using browserless/chrome
+### Recommended Approach: Using Our Custom Image
 
-The most reliable way to run Chrome with CDP support is to use the browserless/chrome image directly:
+The most reliable way to run Chrome with CDP support is to use our custom image:
+
+```bash
+# Build the custom image
+docker build -t cdp-browser -f docker/Dockerfile .
+
+# Run the custom image
+docker run -d -p 9222:9222 -p 9223:9223 --name cdp-browser-container cdp-browser
+```
+
+This image includes:
+- Chrome with CDP enabled
+- A WebSocket proxy for remote connections
+- Support for headless mode
+- Support for proxy servers
+
+### WebSocket Proxy
+
+Our custom image includes a WebSocket proxy that allows connections from any IP address to the Chrome instance. The proxy:
+
+- Listens on port 9223
+- Forwards WebSocket connections to Chrome on port 9222
+- Handles browser instance ID management
+- Provides better stability for remote connections
+
+To connect to the proxy, use port 9223 instead of 9222 in your CDP client:
+
+```python
+# Connect to the proxy
+browser = Browser("localhost", 9223)
+```
+
+### Alternative: Using browserless/chrome
+
+You can also use the browserless/chrome image directly:
 
 ```bash
 # Run browserless/chrome
@@ -118,25 +153,11 @@ docker run -d -p 9222:3000 --name browserless-chrome browserless/chrome:latest
 
 This image is specifically designed to expose the Chrome DevTools Protocol and works reliably with our CDP Browser client.
 
-### Alternative: Building a Custom Image
-
-If you need a custom image with additional dependencies, you can build one using our Dockerfile:
-
-```bash
-# Build the custom image
-docker build -t cdp-browser -f docker/Dockerfile .
-
-# Run the custom image
-docker run -d -p 9222:9222 --name cdp-browser-container cdp-browser
-```
-
-Note: The custom image may require additional configuration to work correctly with the CDP Browser client.
-
 ### How CDP Browser Interacts with Docker
 
 1. **Connection Establishment**:
    - The CDP Browser client connects to the Chrome instance running in Docker via WebSocket
-   - Connection is made to `ws://localhost:9222/` which is forwarded to the container
+   - Connection is made to `ws://localhost:9223/` which is forwarded to the container
 
 2. **Protocol Communication**:
    - Commands are sent as JSON messages over the WebSocket connection
@@ -144,19 +165,19 @@ Note: The custom image may require additional configuration to work correctly wi
 
 3. **Browser Control Flow**:
    ```
-   ┌───────────────┐     ┌───────────────┐     ┌───────────────┐
-   │ CDP Browser   │     │ Docker        │     │ Chrome        │
-   │ Client        │     │ Container     │     │ Browser       │
-   │               │     │               │     │               │
-   │ 1. Connect    │────▶│               │────▶│ WebSocket     │
-   │               │     │               │     │ Server        │
-   │               │     │               │     │               │
-   │ 2. Send       │────▶│ Port          │────▶│ Execute       │
-   │    Command    │     │ Forwarding    │     │ Command       │
-   │               │     │               │     │               │
-   │ 3. Receive    │◀────│               │◀────│ Return        │
-   │    Response   │     │               │     │ Result        │
-   └───────────────┘     └───────────────┘     └───────────────┘
+   ┌───────────────┐     ┌───────────────┐     ┌───────────────┐     ┌───────────────┐
+   │ CDP Browser   │     │ Docker        │     │ WebSocket     │     │ Chrome        │
+   │ Client        │     │ Container     │     │ Proxy         │     │ Browser       │
+   │               │     │               │     │               │     │               │
+   │ 1. Connect    │────▶│               │────▶│               │────▶│ WebSocket     │
+   │               │     │               │     │               │     │ Server        │
+   │               │     │               │     │               │     │               │
+   │ 2. Send       │────▶│ Port          │────▶│ Forward      │────▶│ Execute       │
+   │    Command    │     │ Forwarding    │     │ Command      │     │ Command       │
+   │               │     │               │     │               │     │               │
+   │ 3. Receive    │◀────│               │◀────│               │◀────│ Return        │
+   │    Response   │     │               │     │               │     │ Result        │
+   └───────────────┘     └───────────────┘     └───────────────┘     └───────────────┘
    ```
 
 ## Usage Examples
@@ -168,8 +189,8 @@ import asyncio
 from cdp_browser.browser.browser import Browser
 
 async def main():
-    # Create browser instance
-    browser = Browser("localhost", 9222)
+    # Create browser instance (using the proxy port)
+    browser = Browser("localhost", 9223)
     
     try:
         # Connect to browser
@@ -196,22 +217,54 @@ async def main():
 asyncio.run(main())
 ```
 
-### Using the Browserless API
+### Using the Chrome DevTools Protocol Directly
 
-For more reliable operation, you can use the browserless API directly:
+For more advanced operations, you can use the CDP protocol directly:
 
 ```python
 import asyncio
 import aiohttp
-from urllib.parse import urljoin
+import base64
 
 async def take_screenshot(url):
+    # Connect to the proxy
     async with aiohttp.ClientSession() as session:
-        async with session.post(
-            "http://localhost:9222/screenshot",
-            json={"url": url, "options": {"fullPage": True}}
-        ) as response:
-            return await response.read()
+        # Get available targets
+        async with session.get("http://localhost:9223/json/list") as response:
+            targets = await response.json()
+            target = targets[0]
+            
+            # Connect to the target via WebSocket
+            ws_url = target["webSocketDebuggerUrl"]
+            async with session.ws_connect(ws_url) as ws:
+                # Navigate to the URL
+                await ws.send_json({
+                    "id": 1,
+                    "method": "Page.navigate",
+                    "params": {"url": url}
+                })
+                
+                # Wait for navigation to complete
+                while True:
+                    msg = await ws.receive_json()
+                    if msg.get("id") == 1:
+                        break
+                
+                # Wait a bit for the page to render
+                await asyncio.sleep(1)
+                
+                # Capture screenshot
+                await ws.send_json({
+                    "id": 2,
+                    "method": "Page.captureScreenshot",
+                    "params": {"format": "png", "quality": 100}
+                })
+                
+                # Wait for screenshot response
+                while True:
+                    msg = await ws.receive_json()
+                    if msg.get("id") == 2:
+                        return base64.b64decode(msg["result"]["data"])
 
 async def main():
     screenshot = await take_screenshot("https://example.com")
