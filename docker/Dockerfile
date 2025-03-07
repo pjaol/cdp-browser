@@ -33,5 +33,9 @@ EXPOSE 3000
 # Return to the original working directory
 WORKDIR /usr/src/app
 
-# Use the default CMD from browserless/chrome
-CMD ["./start.sh"] 
+# Copy our custom startup script
+COPY docker/entrypoint.sh ./startup.sh
+RUN chmod +x ./startup.sh
+
+# Use our custom startup script
+CMD ["./startup.sh"] 
