@@ -66,7 +66,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="CDP Browser")
     parser.add_argument("url", help="URL to navigate to")
     parser.add_argument("--host", default="localhost", help="Chrome DevTools host")
-    parser.add_argument("--port", type=int, default=9222, help="Chrome DevTools port")
+    parser.add_argument("--port", type=int, default=9223, help="Chrome DevTools port")
     parser.add_argument("--proxy", help="Proxy URL")
     parser.add_argument("--screenshot", help="Screenshot file path")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")

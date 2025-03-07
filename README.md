@@ -3,17 +3,17 @@
 A lightweight Python client for Chrome DevTools Protocol (CDP) on ARM64 architecture.
 
 ## Why?
-While developing tech, the standard it's working on my laptop issue hit.
-I was moving to a docker compose setup and my chrome integrations were failing and I discovered that chrome was no longer support on Linux ARM64 or aarch64. 
-Selenium which was driving the interactions, was also built only for x86_64, so even if I got a chrome docker instance working like browserless or puppettier they would still run afowl with selenium. 
+I ran into the classic “it works on my laptop” problem when migrating to a Docker Compose setup. 
+My Chrome integrations suddenly failed because Chrome was no longer supported on Linux ARM64/aarch64. 
+And docker on Mac's are ARM64 architectures... 
+Selenium web driver, which handled browser interactions, only works on x86_64, 
+so even solutions like selenium, Puppeteer, Undetectable weren’t working. 
 
-CDP (Chrome Developer Protocol) seemed like the way to go, it's basically the DevTools in chrome listening on a websocket but with additonal functionality for browser control.
+*I'm a huge fan of [Undetectable](https://github.com/ultrafunkamsterdam/undetected-chromedriver) and took inspiration from [nodriver](https://github.com/ultrafunkamsterdam/nodriver) for this.*
 
-There are a few libraries out that implement CDP, however again I could not get them to work
-some required a local instance meaning if you got a working docker chrome, your application would also work in that docker instance
-Others were automated to transpile the CDP protocol and are simply not working. 
+The Chrome Developer Protocol (CDP) looked promising, since it exposes Chrome’s DevTools over a WebSocket and provides additional features for browser control. Unfortunately, existing CDP libraries either required a local Chrome instance—forcing your application to run in the same container — and / or relied on transpiling the CDP protocol and are currently broken...
 
-Hence regrettably we had to do our own.
+In the end, I had to build my own solution.
 
 ## Features
 
@@ -172,8 +172,8 @@ This image is specifically designed to expose the Chrome DevTools Protocol and w
    │ 1. Connect    │────▶│               │────▶│               │────▶│ WebSocket     │
    │               │     │               │     │               │     │ Server        │
    │               │     │               │     │               │     │               │
-   │ 2. Send       │────▶│ Port          │────▶│ Forward      │────▶│ Execute       │
-   │    Command    │     │ Forwarding    │     │ Command      │     │ Command       │
+   │ 2. Send       │────▶│ Port          │────▶│ Forward       │────▶│ Execute       │
+   │    Command    │     │ Forwarding    │     │ Command       │     │ Command       │
    │               │     │               │     │               │     │               │
    │ 3. Receive    │◀────│               │◀────│               │◀────│ Return        │
    │    Response   │     │               │     │               │     │ Result        │

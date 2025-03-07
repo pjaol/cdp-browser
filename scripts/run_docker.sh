@@ -7,7 +7,7 @@ docker build -t cdp-browser -f docker/Dockerfile .
 
 # Run the Docker container
 echo "Running Docker container..."
-docker run -p 9222:9222 --rm cdp-browser
+docker run -p 9223:9223 --rm cdp-browser
 
 # Note: Add additional options as needed:
 # - To disable headless mode: -e HEADLESS=false

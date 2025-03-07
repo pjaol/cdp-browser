@@ -4,38 +4,28 @@ USER root
 
 # Install Python and other dependencies
 RUN apt-get update && apt-get install -y \
-    python3-pip \
-    python3-venv \
     curl \
+    telnet \
+    nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/*
+    
 
-# Install Poetry
-RUN curl -sSL https://install.python-poetry.org | python3 -
-ENV PATH="/root/.local/bin:$PATH"
+# Install http-proxy for reverse proxy
+RUN npm install -g http-proxy
+#RUN groupadd -r nobody
+#RUN useradd -r -g nobody -d /home/nobody -s /bin/bash -c "Docker image user" nobody
 
-# Create a directory for our Python application
-RUN mkdir -p /app
-WORKDIR /app
-
-# Copy project files
-COPY pyproject.toml poetry.lock* ./
-
-# Install dependencies
-RUN poetry config virtualenvs.create false \
-    && poetry install --no-interaction --no-ansi --without dev --no-root
-
-# Copy the rest of the application
-COPY . .
 
 # Expose browserless port
-EXPOSE 3000
+EXPOSE 9222
+EXPOSE 9223
 
-# Return to the original working directory
-WORKDIR /usr/src/app
-
-# Copy our custom startup script
-COPY docker/entrypoint.sh ./startup.sh
+# Copy our custom startup script and proxy script
+COPY docker/startup.sh ./startup.sh
+COPY docker/proxy.js ./proxy.js
 RUN chmod +x ./startup.sh
 
+#USER nobody
 # Use our custom startup script
 CMD ["./startup.sh"] 
