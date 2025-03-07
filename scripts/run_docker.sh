@@ -3,11 +3,14 @@
 
 # Build the Docker image
 echo "Building Docker image..."
-docker build -t cdp-browser -f docker/Dockerfile .
+#docker build -t cdp-browser -f docker/Dockerfile .
 
 # Run the Docker container
-echo "Running Docker container..."
-docker run -p 9223:9223 --rm cdp-browser
+cd docker && \
+    docker build -t cdp-browser . && \
+    cd .. && \
+    echo "Running Docker container..." && \
+    docker run -p 9223:9223 --rm  --name cdp-browser-container cdp-browser
 
 # Note: Add additional options as needed:
 # - To disable headless mode: -e HEADLESS=false

@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 class Page:
     """
     Manages a browser page/tab via CDP.
+    Supports async context manager protocol for automatic attachment/detachment.
     """
 
     def __init__(self, browser, target_id: str, target_info: Dict[str, Any]):
@@ -38,6 +39,22 @@ class Page:
         self.title = target_info.get("title", "")
         self.attached = False
         self.navigation_promise = None
+
+    async def __aenter__(self) -> "Page":
+        """
+        Enter async context, attaching to the page.
+
+        Returns:
+            Page instance
+        """
+        await self.attach()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        """
+        Exit async context, detaching from the page.
+        """
+        await self.detach()
 
     async def attach(self) -> None:
         """
@@ -105,9 +122,17 @@ class Page:
             return
         
         try:
+            # Cancel any pending navigation
+            if self.navigation_promise and not self.navigation_promise.done():
+                self.navigation_promise.cancel()
+                self.navigation_promise = None
+            
             # Disable domains
-            await self._send_command("Page.disable")
-            await self._send_command("Runtime.disable")
+            try:
+                await self._send_command("Page.disable")
+                await self._send_command("Runtime.disable")
+            except Exception as e:
+                logger.warning(f"Error disabling domains: {str(e)}")
             
             # Disconnect from page
             await self.connection.disconnect()

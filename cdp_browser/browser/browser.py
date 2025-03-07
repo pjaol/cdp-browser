@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 class Browser:
     """
     Manages a Chrome browser instance via CDP.
+    Supports async context manager protocol for automatic connection handling.
     """
 
     def __init__(self, host: str = "localhost", port: int = 9223):
@@ -37,6 +38,15 @@ class Browser:
         self.pages = {}
         self.targets = {}
         self.debug_url = f"http://{host}:{port}"
+
+    async def __aenter__(self) -> "Browser":
+        """Async context manager entry."""
+        await self.connect()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Async context manager exit."""
+        await self.disconnect()
 
     async def connect(self) -> None:
         """
@@ -66,11 +76,33 @@ class Browser:
         Disconnect from Chrome DevTools Protocol.
         """
         if self.connection:
-            await self.connection.disconnect()
-            self.connection = None
-            self.pages = {}
-            self.targets = {}
-            logger.info("Disconnected from browser")
+            try:
+                # Close all pages first
+                page_ids = list(self.pages.keys())
+                for target_id in page_ids:
+                    try:
+                        await self.close_page(target_id)
+                    except Exception as e:
+                        logger.warning(f"Error closing page {target_id}: {str(e)}")
+                
+                # Ensure all pages are detached
+                for target_id in page_ids:
+                    if target_id in self.pages:
+                        page = self.pages[target_id]
+                        try:
+                            await page.detach()
+                        except Exception as e:
+                            logger.warning(f"Error detaching page {target_id}: {str(e)}")
+                
+                # Disconnect from browser
+                await self.connection.disconnect()
+            except Exception as e:
+                logger.error(f"Error during browser disconnect: {str(e)}")
+            finally:
+                self.connection = None
+                self.pages.clear()
+                self.targets.clear()
+                logger.info("Disconnected from browser")
 
     async def _get_browser_ws_url(self) -> str:
         """
@@ -167,6 +199,16 @@ class Browser:
             List of targets
         """
         try:
+            # First try the CDP command if we have a connection
+            if self.connection:
+                try:
+                    result = await self.connection.send_command("Target.getTargets")
+                    if result and "targetInfos" in result:
+                        return result["targetInfos"]
+                except Exception as e:
+                    logger.warning(f"Failed to get targets via CDP: {str(e)}")
+            
+            # Fallback to HTTP endpoint
             async with aiohttp.ClientSession() as session:
                 async with session.get(f"{self.debug_url}/json/list") as response:
                     if response.status != 200:
@@ -177,6 +219,16 @@ class Browser:
                     data = await response.json()
                     if not isinstance(data, list):
                         raise CDPConnectionError("Invalid response format for targets")
+                    
+                    # Ensure we have at least one target
+                    if not data:
+                        # Try to create a new target if none exist
+                        async with session.put(f"{self.debug_url}/json/new") as new_response:
+                            if new_response.status == 200:
+                                # Retry getting targets
+                                async with session.get(f"{self.debug_url}/json/list") as retry_response:
+                                    if retry_response.status == 200:
+                                        data = await retry_response.json()
                     
                     return data
         except aiohttp.ClientError as e:

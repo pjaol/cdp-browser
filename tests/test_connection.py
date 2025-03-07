@@ -4,9 +4,20 @@ Tests for CDP connection.
 import asyncio
 import os
 import pytest
+import aiohttp
 
 from cdp_browser.core.connection import CDPConnection
 from cdp_browser.core.exceptions import CDPConnectionError
+
+
+async def get_browser_ws_url() -> str:
+    """Get the browser WebSocket URL."""
+    async with aiohttp.ClientSession() as session:
+        async with session.get("http://localhost:9223/json/version") as response:
+            if response.status != 200:
+                raise CDPConnectionError(f"Failed to get browser WebSocket URL: {response.status}")
+            data = await response.json()
+            return data.get("webSocketDebuggerUrl")
 
 
 @pytest.mark.asyncio
@@ -21,7 +32,7 @@ async def test_connection_invalid_url():
 @pytest.mark.asyncio
 async def test_send_command_not_connected():
     """Test sending command when not connected."""
-    connection = CDPConnection("ws://localhost:9222")
+    connection = CDPConnection("ws://localhost:9223")
     
     with pytest.raises(CDPConnectionError):
         await connection.send_command("Browser.getVersion")
@@ -34,15 +45,17 @@ async def test_send_command_not_connected():
 @pytest.mark.asyncio
 async def test_connection_valid():
     """Test connection with valid URL."""
-    connection = CDPConnection("ws://localhost:9222/devtools/browser/about:blank")
-    
     try:
+        ws_url = await get_browser_ws_url()
+        connection = CDPConnection(ws_url)
+        
         await connection.connect()
         assert connection.connected
     except CDPConnectionError:
         pytest.skip("Chrome not available")
     finally:
-        await connection.disconnect()
+        if 'connection' in locals():
+            await connection.disconnect()
 
 
 @pytest.mark.skipif(
@@ -52,13 +65,17 @@ async def test_connection_valid():
 @pytest.mark.asyncio
 async def test_send_command():
     """Test sending command."""
-    connection = CDPConnection("ws://localhost:9222/devtools/browser/about:blank")
-    
     try:
+        ws_url = await get_browser_ws_url()
+        connection = CDPConnection(ws_url)
+        
         await connection.connect()
         result = await connection.send_command("Browser.getVersion")
-        assert "Browser" in result
+        assert "product" in result
+        assert "Chrome" in result["product"]
+        assert "protocolVersion" in result
     except CDPConnectionError:
         pytest.skip("Chrome not available")
     finally:
-        await connection.disconnect() 
+        if 'connection' in locals():
+            await connection.disconnect() 

@@ -20,7 +20,7 @@ async def main():
     configure_logging(level=20)  # INFO level
     
     # Create browser instance
-    browser = Browser("localhost", 9222)
+    browser = Browser("localhost", 9223)
     
     try:
         # Connect to browser

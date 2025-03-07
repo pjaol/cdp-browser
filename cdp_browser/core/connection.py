@@ -3,9 +3,10 @@ Connection module for CDP Browser.
 Handles WebSocket connections to Chrome DevTools Protocol.
 """
 import asyncio
+import contextlib
 import json
 import logging
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union, Set
 
 import websockets
 from websockets.exceptions import ConnectionClosed
@@ -13,6 +14,20 @@ from websockets.exceptions import ConnectionClosed
 from cdp_browser.core.exceptions import CDPConnectionError
 
 logger = logging.getLogger(__name__)
+
+
+@contextlib.asynccontextmanager
+async def preserve_loop_state():
+    """
+    Context manager to preserve event loop state during cleanup.
+    """
+    loop = asyncio.get_running_loop()
+    is_closed = loop.is_closed()
+    try:
+        yield
+    finally:
+        if not is_closed and loop.is_closed():
+            logger.debug("Event loop was closed during operation")
 
 
 class CDPConnection:
@@ -33,7 +48,9 @@ class CDPConnection:
         self.callbacks = {}
         self.event_listeners = {}
         self.connected = False
-        self.connection_task = None
+        self._pending_tasks: Set[asyncio.Task] = set()
+        self._closing = False
+        self._message_listener_task = None
 
     async def connect(self) -> None:
         """
@@ -42,28 +59,112 @@ class CDPConnection:
         try:
             self.ws = await websockets.connect(self.ws_url)
             self.connected = True
-            self.connection_task = asyncio.create_task(self._listen_for_messages())
+            self._message_listener_task = self._create_task(self._listen_for_messages())
             logger.info(f"Connected to CDP at {self.ws_url}")
         except Exception as e:
             self.connected = False
             raise CDPConnectionError(f"Failed to connect to CDP: {str(e)}")
 
+    def _create_task(self, coro) -> asyncio.Task:
+        """
+        Create a task and add it to pending tasks set.
+        
+        Args:
+            coro: Coroutine to create task from
+            
+        Returns:
+            Created task
+        """
+        task = asyncio.create_task(coro)
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._pending_tasks.discard)
+        return task
+
+    async def _cancel_pending_tasks(self) -> None:
+        """
+        Cancel all pending tasks and wait for them to complete.
+        """
+        if not self._pending_tasks:
+            return
+
+        # Cancel all pending tasks
+        for task in self._pending_tasks:
+            if not task.done():
+                task.cancel()
+
+        # Wait for tasks to complete with timeout
+        pending = list(self._pending_tasks)
+        try:
+            async with preserve_loop_state():
+                done, pending = await asyncio.wait(
+                    pending,
+                    timeout=0.5,  # Short timeout to minimize wait time
+                    return_when=asyncio.ALL_COMPLETED
+                )
+                # Log any tasks that didn't complete
+                if pending:
+                    logger.warning(
+                        f"{len(pending)} tasks did not complete within timeout"
+                    )
+        except asyncio.CancelledError:
+            logger.debug("Task cancellation interrupted")
+        finally:
+            self._pending_tasks.clear()
+
+    async def _close_websocket(self) -> None:
+        """
+        Close the WebSocket connection gracefully.
+        """
+        if not self.ws:
+            return
+
+        try:
+            # Cancel message listener first
+            if self._message_listener_task and not self._message_listener_task.done():
+                self._message_listener_task.cancel()
+                try:
+                    async with preserve_loop_state():
+                        await asyncio.wait_for(self._message_listener_task, timeout=0.2)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass
+
+            # Try graceful closure with short timeout
+            try:
+                async with preserve_loop_state():
+                    await asyncio.wait_for(self.ws.close(), timeout=0.2)
+            except (asyncio.TimeoutError, ConnectionClosed):
+                pass
+            except Exception as e:
+                logger.warning(f"Error during WebSocket close: {str(e)}")
+        finally:
+            self.ws = None
+            self._message_listener_task = None
+
     async def disconnect(self) -> None:
         """
         Disconnect from Chrome DevTools Protocol.
         """
-        if self.connection_task:
-            self.connection_task.cancel()
-            try:
-                await self.connection_task
-            except asyncio.CancelledError:
-                pass
-            self.connection_task = None
+        if self._closing:
+            return
 
-        if self.ws:
-            await self.ws.close()
-            self.ws = None
+        self._closing = True
+        try:
+            # Cancel all pending tasks first
+            await self._cancel_pending_tasks()
+
+            # Clean up callbacks
+            for _, (_, future) in self.callbacks.items():
+                if not future.done():
+                    future.cancel()
+            self.callbacks.clear()
+
+            # Close WebSocket connection
+            await self._close_websocket()
+        except Exception as e:
+            logger.warning(f"Error during disconnect: {str(e)}")
+        finally:
             self.connected = False
+            self._closing = False
             logger.info("Disconnected from CDP")
 
     async def _listen_for_messages(self) -> None:
@@ -75,12 +176,21 @@ class CDPConnection:
 
         try:
             async for message in self.ws:
-                await self._process_message(message)
+                if self._closing:
+                    break
+                
+                # Process message in a separate task to avoid blocking
+                self._create_task(self._process_message(message))
         except ConnectionClosed:
-            logger.warning("CDP connection closed")
+            if not self._closing:
+                logger.warning("CDP connection closed")
             self.connected = False
+        except asyncio.CancelledError:
+            logger.info("Message listener cancelled")
+            raise
         except Exception as e:
-            logger.error(f"Error in CDP message listener: {str(e)}")
+            if not self._closing:
+                logger.error(f"Error in CDP message listener: {str(e)}")
             self.connected = False
 
     async def _process_message(self, message: str) -> None:
@@ -90,6 +200,9 @@ class CDPConnection:
         Args:
             message: Message from CDP
         """
+        if self._closing:
+            return
+
         try:
             data = json.loads(message)
             
@@ -99,11 +212,13 @@ class CDPConnection:
                 if message_id in self.callbacks:
                     callback, future = self.callbacks[message_id]
                     if "result" in data:
-                        future.set_result(data["result"])
+                        if not future.done():
+                            future.set_result(data["result"])
                     elif "error" in data:
-                        future.set_exception(
-                            CDPConnectionError(f"CDP Error: {data['error']}")
-                        )
+                        if not future.done():
+                            future.set_exception(
+                                CDPConnectionError(f"CDP Error: {data['error']}")
+                            )
                     del self.callbacks[message_id]
             
             # Handle event
@@ -137,6 +252,9 @@ class CDPConnection:
         if not self.ws or not self.connected:
             raise CDPConnectionError("Not connected to CDP")
 
+        if self._closing:
+            raise CDPConnectionError("Connection is closing")
+
         self.message_id += 1
         message_id = self.message_id
         
@@ -148,20 +266,25 @@ class CDPConnection:
         if params:
             message["params"] = params
 
-        future = asyncio.get_running_loop().create_future()
-        self.callbacks[message_id] = (method, future)
-        
         try:
+            loop = asyncio.get_running_loop()
+            if loop.is_closed():
+                raise CDPConnectionError("Event loop is closed")
+            
+            future = loop.create_future()
+            self.callbacks[message_id] = (method, future)
+            
             await self.ws.send(json.dumps(message))
-        except Exception as e:
-            del self.callbacks[message_id]
-            raise CDPConnectionError(f"Failed to send CDP command: {str(e)}")
-        
-        try:
+            
             return await future
         except asyncio.CancelledError:
-            del self.callbacks[message_id]
+            if message_id in self.callbacks:
+                del self.callbacks[message_id]
             raise
+        except Exception as e:
+            if message_id in self.callbacks:
+                del self.callbacks[message_id]
+            raise CDPConnectionError(f"Error in CDP command {method}: {str(e)}")
 
     def add_event_listener(self, event: str, callback: Callable) -> None:
         """
