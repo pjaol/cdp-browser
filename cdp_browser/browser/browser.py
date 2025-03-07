@@ -23,13 +23,13 @@ class Browser:
     Manages a Chrome browser instance via CDP.
     """
 
-    def __init__(self, host: str = "localhost", port: int = 9222):
+    def __init__(self, host: str = "localhost", port: int = 9223):
         """
         Initialize a Browser instance.
 
         Args:
-            host: Chrome DevTools host
-            port: Chrome DevTools port
+            host: Chrome DevTools host (default: localhost)
+            port: Chrome DevTools port (default: 9223 for Docker setup)
         """
         self.host = host
         self.port = port
@@ -56,6 +56,8 @@ class Browser:
             
             # Attach to targets
             await self._attach_to_targets()
+        except aiohttp.ClientError as e:
+            raise CDPConnectionError(f"Failed to connect to Chrome: {str(e)}")
         except Exception as e:
             raise CDPConnectionError(f"Failed to connect to browser: {str(e)}")
 
@@ -76,22 +78,47 @@ class Browser:
 
         Returns:
             WebSocket URL for browser connection
+        
+        Raises:
+            CDPConnectionError: If unable to get WebSocket URL
         """
         try:
             async with aiohttp.ClientSession() as session:
+                # First try /json/version endpoint
                 async with session.get(f"{self.debug_url}/json/version") as response:
-                    if response.status != 200:
-                        raise CDPConnectionError(
-                            f"Failed to get browser WebSocket URL: {response.status}"
-                        )
-                    
-                    data = await response.json()
-                    ws_url = data.get("webSocketDebuggerUrl")
-                    
-                    if not ws_url:
-                        raise CDPConnectionError("WebSocket URL not found in response")
-                    
-                    return ws_url
+                    if response.status == 200:
+                        data = await response.json()
+                        ws_url = data.get("webSocketDebuggerUrl")
+                        if ws_url:
+                            # Ensure the WebSocket URL uses the correct host and port
+                            if "127.0.0.1" in ws_url or "localhost" in ws_url:
+                                ws_url = ws_url.replace("127.0.0.1", self.host)
+                                ws_url = ws_url.replace("localhost", self.host)
+                                if f":{self.port}" not in ws_url:
+                                    ws_url = ws_url.replace("/devtools", f":{self.port}/devtools")
+                            return ws_url
+                
+                # If /json/version doesn't work, try /json/list
+                async with session.get(f"{self.debug_url}/json/list") as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if isinstance(data, list) and len(data) > 0:
+                            browser_target = next(
+                                (t for t in data if t.get("type") == "browser"), None
+                            )
+                            if browser_target and browser_target.get("webSocketDebuggerUrl"):
+                                ws_url = browser_target["webSocketDebuggerUrl"]
+                                # Ensure the WebSocket URL uses the correct host and port
+                                if "127.0.0.1" in ws_url or "localhost" in ws_url:
+                                    ws_url = ws_url.replace("127.0.0.1", self.host)
+                                    ws_url = ws_url.replace("localhost", self.host)
+                                    if f":{self.port}" not in ws_url:
+                                        ws_url = ws_url.replace("/devtools", f":{self.port}/devtools")
+                                return ws_url
+                
+                raise CDPConnectionError(
+                    f"Failed to get browser WebSocket URL from {self.debug_url}"
+                )
         except aiohttp.ClientError as e:
             raise CDPConnectionError(f"Failed to connect to Chrome: {str(e)}")
 
@@ -107,7 +134,7 @@ class Browser:
         
         # Attach to each page target
         for target in targets:
-            target_id = target.get("targetId")
+            target_id = target.get("id") or target.get("targetId")
             target_type = target.get("type")
             
             if target_type == "page" and target_id:
@@ -139,11 +166,23 @@ class Browser:
         Returns:
             List of targets
         """
-        if not self.connection:
-            raise CDPConnectionError("Not connected to browser")
-        
-        result = await self.connection.send_command("Target.getTargets")
-        return result.get("targetInfos", [])
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{self.debug_url}/json/list") as response:
+                    if response.status != 200:
+                        raise CDPConnectionError(
+                            f"Failed to get targets: {response.status}"
+                        )
+                    
+                    data = await response.json()
+                    if not isinstance(data, list):
+                        raise CDPConnectionError("Invalid response format for targets")
+                    
+                    return data
+        except aiohttp.ClientError as e:
+            raise CDPConnectionError(f"Failed to get targets: {str(e)}")
+        except json.JSONDecodeError as e:
+            raise CDPConnectionError(f"Invalid JSON response for targets: {str(e)}")
 
     async def new_page(self) -> Page:
         """
@@ -155,31 +194,34 @@ class Browser:
         if not self.connection:
             raise CDPConnectionError("Not connected to browser")
         
-        # Create a new target (page)
-        result = await self.connection.send_command(
-            "Target.createTarget", {"url": "about:blank"}
-        )
-        
-        target_id = result.get("targetId")
-        if not target_id:
-            raise CDPError("Failed to create new page")
-        
-        # Get target info
-        targets = await self.get_targets()
-        target = next((t for t in targets if t.get("targetId") == target_id), None)
-        
-        if not target:
-            raise CDPError("Failed to get target info for new page")
-        
-        # Create a page for this target
-        page = Page(self, target_id, target)
-        self.pages[target_id] = page
-        self.targets[target_id] = target
-        
-        # Attach to target
-        await page.attach()
-        
-        return page
+        try:
+            # Create a new target (page) using PUT request
+            async with aiohttp.ClientSession() as session:
+                async with session.put(f"{self.debug_url}/json/new") as response:
+                    if response.status != 200:
+                        raise CDPError(f"Failed to create new page: {response.status}")
+                    
+                    target = await response.json()
+                    if not isinstance(target, dict):
+                        raise CDPError("Invalid response format for new page")
+                    
+                    target_id = target.get("id")
+                    if not target_id:
+                        raise CDPError("Target ID not found in response")
+                    
+                    # Create a page for this target
+                    page = Page(self, target_id, target)
+                    self.pages[target_id] = page
+                    self.targets[target_id] = target
+                    
+                    # Attach to target
+                    await page.attach()
+                    
+                    return page
+        except aiohttp.ClientError as e:
+            raise CDPError(f"Failed to create new page: {str(e)}")
+        except json.JSONDecodeError as e:
+            raise CDPError(f"Invalid JSON response for new page: {str(e)}")
 
     async def close_page(self, target_id: str) -> None:
         """
@@ -195,12 +237,16 @@ class Browser:
             page = self.pages[target_id]
             await page.detach()
             
-            # Close the target
-            await self.connection.send_command(
-                "Target.closeTarget", {"targetId": target_id}
-            )
-            
-            # Remove from pages and targets
-            del self.pages[target_id]
-            if target_id in self.targets:
-                del self.targets[target_id] 
+            try:
+                # Close the target using HTTP endpoint
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(f"{self.debug_url}/json/close/{target_id}") as response:
+                        if response.status != 200:
+                            logger.warning(f"Failed to close target {target_id}: {response.status}")
+            except Exception as e:
+                logger.warning(f"Error closing target {target_id}: {str(e)}")
+            finally:
+                # Remove from pages and targets
+                del self.pages[target_id]
+                if target_id in self.targets:
+                    del self.targets[target_id] 
