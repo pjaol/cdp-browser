@@ -60,8 +60,20 @@ class Browser:
             # Start listening for target events
             await self._start_target_discovery()
             
-            # Attach to targets
-            await self._attach_to_targets()
+            # Get list of available targets
+            targets = await self.get_targets()
+            
+            # Create pages for each target
+            for target in targets:
+                target_id = target.get("id")
+                target_type = target.get("type")
+                
+                if target_type == "page" and target_id:
+                    self.targets[target_id] = target
+                    
+                    # Create a page for this target
+                    page = Page(self, target_id, target)
+                    self.pages[target_id] = page
         except Exception as e:
             raise CDPConnectionError(f"Failed to connect to browser: {str(e)}")
 
@@ -120,65 +132,12 @@ class Browser:
             return
         
         # Enable target discovery
-        await self.connection.send_command("Target.setDiscoverTargets", {"discover": True})
-        
-        # Listen for targetCreated events
-        async def on_target_created(params):
-            target_info = params.get("targetInfo", {})
-            target_id = target_info.get("targetId")
-            target_type = target_info.get("type")
-            
-            if target_type == "page" and target_id and target_id not in self.targets:
-                self.targets[target_id] = target_info
-                
-                # Create a page for this target
-                page = Page(self, target_id, target_info)
-                self.pages[target_id] = page
-                
-                # Attach to target
-                try:
-                    await page.attach()
-                    
-                    # Notify listeners
-                    for listener in self._target_created_listeners:
-                        try:
-                            await listener(page)
-                        except Exception as e:
-                            logger.error(f"Error in target created listener: {str(e)}")
-                except Exception as e:
-                    logger.error(f"Error attaching to new target {target_id}: {str(e)}")
-        
-        # Listen for targetDestroyed events
-        async def on_target_destroyed(params):
-            target_id = params.get("targetId")
-            
-            if target_id in self.pages:
-                page = self.pages[target_id]
-                
-                # Notify listeners
-                for listener in self._target_destroyed_listeners:
-                    try:
-                        await listener(page)
-                    except Exception as e:
-                        logger.error(f"Error in target destroyed listener: {str(e)}")
-                
-                # Detach from target
-                try:
-                    await page.detach()
-                except Exception as e:
-                    logger.warning(f"Error detaching from destroyed target {target_id}: {str(e)}")
-                
-                # Remove from pages and targets
-                del self.pages[target_id]
-                if target_id in self.targets:
-                    del self.targets[target_id]
-        
-        # Add event listeners
-        self.connection.add_event_listener("Target.targetCreated", on_target_created)
-        self.connection.add_event_listener("Target.targetDestroyed", on_target_destroyed)
-        
-        self._is_listening_for_targets = True
-        logger.debug("Started target discovery")
+        try:
+            await self.connection.send_command("Target.setDiscoverTargets", {"discover": True})
+            self._is_listening_for_targets = True
+            logger.debug("Started target discovery")
+        except Exception as e:
+            logger.warning(f"Error enabling target discovery: {str(e)}")
 
     async def _stop_target_discovery(self) -> None:
         """
@@ -195,34 +154,6 @@ class Browser:
         
         self._is_listening_for_targets = False
         logger.debug("Stopped target discovery")
-
-    async def _attach_to_targets(self) -> None:
-        """
-        Attach to all available targets (pages).
-        """
-        if not self.connection:
-            raise CDPConnectionError("Not connected to browser")
-        
-        # Get list of targets
-        targets = await self.get_targets()
-        
-        # Attach to each page target
-        for target in targets:
-            target_id = target.get("targetId")
-            target_type = target.get("type")
-            
-            if target_type == "page" and target_id:
-                self.targets[target_id] = target
-                
-                # Create a page for this target
-                page = Page(self, target_id, target)
-                self.pages[target_id] = page
-                
-                # Attach to target
-                try:
-                    await page.attach()
-                except Exception as e:
-                    logger.error(f"Error attaching to target {target_id}: {str(e)}")
 
     async def get_version(self) -> Dict[str, str]:
         """
@@ -243,11 +174,17 @@ class Browser:
         Returns:
             List of targets
         """
-        if not self.connection:
-            raise CDPConnectionError("Not connected to browser")
-        
-        result = await self.connection.send_command("Target.getTargets")
-        return result.get("targetInfos", [])
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{self.debug_url}/json/list") as response:
+                    if response.status != 200:
+                        raise CDPConnectionError(
+                            f"Failed to get targets: {response.status}"
+                        )
+                    
+                    return await response.json()
+        except aiohttp.ClientError as e:
+            raise CDPConnectionError(f"Failed to get targets: {str(e)}")
 
     async def new_page(self) -> Page:
         """
@@ -270,7 +207,7 @@ class Browser:
         
         # Get target info
         targets = await self.get_targets()
-        target = next((t for t in targets if t.get("targetId") == target_id), None)
+        target = next((t for t in targets if t.get("id") == target_id), None)
         
         if not target:
             raise CDPError("Failed to get target info for new page")
@@ -279,9 +216,6 @@ class Browser:
         page = Page(self, target_id, target)
         self.pages[target_id] = page
         self.targets[target_id] = target
-        
-        # Attach to target
-        await page.attach()
         
         return page
 

@@ -9,6 +9,8 @@ import logging
 import re
 from typing import Any, Callable, Dict, List, Optional, Union, Tuple
 
+import aiohttp
+
 from cdp_browser.core.exceptions import CDPError, CDPTimeoutError, CDPNavigationError
 
 logger = logging.getLogger(__name__)
@@ -31,12 +33,11 @@ class Page:
         self.browser = browser
         self.target_id = target_id
         self.target_info = target_info
-        self.session_id = None
-        self.frame_id = None
+        self.ws_url = target_info.get("webSocketDebuggerUrl", "")
         self.url = target_info.get("url", "")
         self.title = target_info.get("title", "")
+        self.connection = None
         self.attached = False
-        self.navigation_promise = None
         self.load_event_fired = asyncio.Event()
         self.dom_content_loaded = asyncio.Event()
         self._event_listeners = {}
@@ -48,34 +49,11 @@ class Page:
         """
         Attach to the page target.
         """
-        if not self.browser.connection:
-            raise CDPError("Browser not connected")
+        if not self.ws_url:
+            raise CDPError("WebSocket URL not found in target info")
         
-        # Attach to target
-        result = await self.browser.connection.send_command(
-            "Target.attachToTarget", {"targetId": self.target_id, "flatten": True}
-        )
-        
-        self.session_id = result.get("sessionId")
-        if not self.session_id:
-            raise CDPError("Failed to attach to target")
-        
-        # Enable necessary domains
-        await self._send_command("Page.enable")
-        await self._send_command("Runtime.enable")
-        await self._send_command("Network.enable")
-        
-        # Get frame ID
-        result = await self._send_command("Page.getFrameTree")
-        frame = result.get("frameTree", {}).get("frame", {})
-        self.frame_id = frame.get("id")
-        
-        # Set up event listeners
-        self._setup_event_listeners()
-        
-        # Get navigation history
-        await self._update_navigation_history()
-        
+        # Create a new connection to the page
+        self.connection = aiohttp.ClientSession()
         self.attached = True
         logger.info(f"Attached to page: {self.url}")
 
@@ -83,31 +61,18 @@ class Page:
         """
         Detach from the page target.
         """
-        if not self.browser.connection or not self.session_id:
-            return
+        if self.connection:
+            await self.connection.close()
+            self.connection = None
         
-        try:
-            # Disable domains
-            await self._send_command("Page.disable")
-            await self._send_command("Runtime.disable")
-            await self._send_command("Network.disable")
-            
-            # Detach from target
-            await self.browser.connection.send_command(
-                "Target.detachFromTarget", {"sessionId": self.session_id}
-            )
-        except Exception as e:
-            logger.warning(f"Error detaching from page: {str(e)}")
-        finally:
-            self.attached = False
-            self.session_id = None
-            logger.info(f"Detached from page: {self.url}")
+        self.attached = False
+        logger.info(f"Detached from page: {self.url}")
 
     def _setup_event_listeners(self) -> None:
         """
         Set up event listeners for page events.
         """
-        if not self.browser.connection:
+        if not self.connection:
             return
         
         # Page load event
@@ -159,9 +124,7 @@ class Page:
         """
         self.dom_content_loaded.clear()
 
-    async def _send_command(
-        self, method: str, params: Optional[Dict[str, Any]] = None
-    ) -> Any:
+    async def _send_command(self, method: str, params: Optional[Dict[str, Any]] = None) -> Any:
         """
         Send a command to the page target.
 
@@ -172,19 +135,34 @@ class Page:
         Returns:
             Response from CDP
         """
-        if not self.browser.connection:
-            raise CDPError("Browser not connected")
-        
-        if not self.session_id:
+        if not self.attached:
             raise CDPError("Not attached to page")
         
-        # Add sessionId to params
-        command_params = {"sessionId": self.session_id}
-        if params:
-            command_params.update(params)
+        if not self.connection:
+            raise CDPError("No connection to page")
         
+        # Create message
+        message_id = id(method) % 10000  # Simple ID generation
+        message = {
+            "id": message_id,
+            "method": method,
+            "params": params or {}
+        }
+        
+        # Send message via WebSocket
         try:
-            return await self.browser.connection.send_command(method, command_params)
+            async with self.connection.ws_connect(self.ws_url) as ws:
+                await ws.send_json(message)
+                
+                # Wait for response
+                async for msg in ws:
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        data = json.loads(msg.data)
+                        if data.get("id") == message_id:
+                            if "result" in data:
+                                return data["result"]
+                            elif "error" in data:
+                                raise CDPError(f"CDP Error: {data['error']}")
         except Exception as e:
             logger.error(f"Error sending command {method}: {str(e)}")
             raise CDPError(f"Failed to send command {method}: {str(e)}")
@@ -226,70 +204,74 @@ class Page:
         if not self.attached:
             raise CDPError("Not attached to page")
         
-        # Reset events
-        self.load_event_fired.clear()
-        self.dom_content_loaded.clear()
-        
-        # Create a future for navigation completion
-        navigation_complete = asyncio.Future()
-        
-        # Add event listener for navigation events
-        async def on_frame_navigated(params):
-            frame = params.get("frame", {})
-            frame_id = frame.get("id")
-            
-            # Only consider main frame navigation
-            if frame_id == self.frame_id:
-                url = frame.get("url", "")
-                self.url = url
-                
-                if not navigation_complete.done():
-                    navigation_complete.set_result(True)
-        
-        # Add event listener
-        self.browser.connection.add_event_listener(
-            "Page.frameNavigated", on_frame_navigated
-        )
-        
         try:
             # Navigate to URL
-            result = await self._send_command("Page.navigate", {"url": url})
-            
-            # Check for navigation errors
-            if "errorText" in result:
-                raise CDPNavigationError(f"Navigation failed: {result['errorText']}")
-            
-            # Wait for navigation to complete
-            try:
-                await asyncio.wait_for(navigation_complete, timeout)
+            async with self.connection.ws_connect(self.ws_url) as ws:
+                # Send navigate command
+                await ws.send_json({
+                    "id": 1,
+                    "method": "Page.navigate",
+                    "params": {"url": url}
+                })
                 
-                # Wait for additional events based on wait_until
-                if wait_until == "load":
-                    await asyncio.wait_for(self.load_event_fired.wait(), timeout)
-                elif wait_until == "domcontentloaded":
-                    await asyncio.wait_for(self.dom_content_loaded.wait(), timeout)
-                elif wait_until == "networkidle":
-                    # Wait for network to be idle (no requests for 500ms)
-                    await asyncio.sleep(0.5)
-            except asyncio.TimeoutError:
-                raise CDPTimeoutError(f"Navigation to {url} timed out after {timeout}s")
+                # Wait for response
+                navigation_complete = False
+                load_event_fired = False
+                dom_content_loaded = False
+                
+                start_time = asyncio.get_event_loop().time()
+                
+                while asyncio.get_event_loop().time() - start_time < timeout:
+                    async for msg in ws:
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            data = json.loads(msg.data)
+                            
+                            # Check for navigation response
+                            if data.get("id") == 1:
+                                if "error" in data:
+                                    raise CDPNavigationError(f"Navigation failed: {data['error']}")
+                                navigation_complete = True
+                            
+                            # Check for load event
+                            if data.get("method") == "Page.loadEventFired":
+                                load_event_fired = True
+                            
+                            # Check for DOMContentLoaded event
+                            if data.get("method") == "Page.domContentEventFired":
+                                dom_content_loaded = True
+                            
+                            # Check if we're done based on wait_until
+                            if navigation_complete:
+                                if wait_until == "load" and load_event_fired:
+                                    break
+                                elif wait_until == "domcontentloaded" and dom_content_loaded:
+                                    break
+                                elif wait_until == "networkidle":
+                                    # For networkidle, we'll just wait a bit after navigation
+                                    await asyncio.sleep(0.5)
+                                    break
+                                elif wait_until is None:
+                                    break
+                        
+                        # Check if we've waited long enough
+                        if asyncio.get_event_loop().time() - start_time >= timeout:
+                            raise CDPTimeoutError(f"Navigation to {url} timed out after {timeout}s")
             
             # Update page info
             self.url = url
             
             # Get page title
             result = await self.evaluate("document.title")
-            self.title = result.get("result", {}).get("value", "")
-            
-            # Update navigation history
-            await self._update_navigation_history()
+            self.title = result
             
             logger.info(f"Navigated to: {url}")
-        finally:
-            # Remove event listener
-            self.browser.connection.remove_event_listener(
-                "Page.frameNavigated", on_frame_navigated
-            )
+        except CDPTimeoutError:
+            raise
+        except CDPNavigationError:
+            raise
+        except Exception as e:
+            logger.error(f"Error navigating to {url}: {str(e)}")
+            raise CDPError(f"Failed to navigate to {url}: {str(e)}")
 
     async def reload(self, ignore_cache: bool = False, timeout: int = 30) -> None:
         """
@@ -319,7 +301,7 @@ class Page:
         
         # Update page info
         result = await self.evaluate("document.title")
-        self.title = result.get("result", {}).get("value", "")
+        self.title = result
         
         # Update navigation history
         await self._update_navigation_history()
@@ -367,7 +349,7 @@ class Page:
         
         # Update page info
         result = await self.evaluate("document.title")
-        self.title = result.get("result", {}).get("value", "")
+        self.title = result
         self.url = self._navigation_history[current_index - 1].get("url", "")
         
         # Update navigation history
@@ -418,7 +400,7 @@ class Page:
         
         # Update page info
         result = await self.evaluate("document.title")
-        self.title = result.get("result", {}).get("value", "")
+        self.title = result
         self.url = self._navigation_history[current_index + 1].get("url", "")
         
         # Update navigation history
@@ -427,7 +409,7 @@ class Page:
         logger.info(f"Navigated forward to: {self.url}")
         return True
 
-    async def evaluate(self, expression: str, return_by_value: bool = True, await_promise: bool = True) -> Dict[str, Any]:
+    async def evaluate(self, expression: str, return_by_value: bool = True, await_promise: bool = True) -> Any:
         """
         Evaluate JavaScript expression.
 
@@ -443,14 +425,30 @@ class Page:
             raise CDPError("Not attached to page")
         
         try:
-            return await self._send_command(
-                "Runtime.evaluate",
-                {
-                    "expression": expression,
-                    "returnByValue": return_by_value,
-                    "awaitPromise": await_promise,
-                },
-            )
+            async with self.connection.ws_connect(self.ws_url) as ws:
+                # Send evaluate command
+                await ws.send_json({
+                    "id": 1,
+                    "method": "Runtime.evaluate",
+                    "params": {
+                        "expression": expression,
+                        "returnByValue": return_by_value,
+                        "awaitPromise": await_promise
+                    }
+                })
+                
+                # Wait for response
+                async for msg in ws:
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        data = json.loads(msg.data)
+                        if data.get("id") == 1:
+                            if "result" in data:
+                                result = data["result"]
+                                if "result" in result:
+                                    return result["result"].get("value")
+                                return result
+                            elif "error" in data:
+                                raise CDPError(f"Evaluation error: {data['error']}")
         except Exception as e:
             logger.error(f"Error evaluating expression: {str(e)}")
             raise CDPError(f"Failed to evaluate expression: {str(e)}")
@@ -555,7 +553,7 @@ class Page:
             
             # Update page info
             result = await self.evaluate("document.title")
-            self.title = result.get("result", {}).get("value", "")
+            self.title = result
             
             # Update navigation history
             await self._update_navigation_history()
@@ -584,45 +582,88 @@ class Page:
         if format not in ["png", "jpeg"]:
             raise ValueError("Format must be 'png' or 'jpeg'")
         
-        if full_page:
-            # Get page dimensions
-            dimensions = await self.evaluate("""
-            ({
-                width: Math.max(document.body.scrollWidth, document.documentElement.scrollWidth),
-                height: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight),
-                deviceScaleFactor: window.devicePixelRatio || 1,
-                mobile: false
-            })
-            """)
-            
-            width = dimensions.get("result", {}).get("value", {}).get("width", 800)
-            height = dimensions.get("result", {}).get("value", {}).get("height", 600)
-            
-            # Set viewport to full page size
-            await self._send_command(
-                "Emulation.setDeviceMetricsOverride",
-                {
-                    "width": width,
-                    "height": height,
-                    "deviceScaleFactor": 1,
-                    "mobile": False
-                }
-            )
-        
         try:
-            # Take screenshot
-            result = await self._send_command(
-                "Page.captureScreenshot",
-                {"format": format, "quality": quality},
-            )
-        finally:
-            if full_page:
-                # Reset viewport
-                await self._send_command("Emulation.clearDeviceMetricsOverride")
+            async with self.connection.ws_connect(self.ws_url) as ws:
+                if full_page:
+                    # Get page dimensions
+                    await ws.send_json({
+                        "id": 1,
+                        "method": "Runtime.evaluate",
+                        "params": {
+                            "expression": """
+                            ({
+                                width: Math.max(document.body.scrollWidth, document.documentElement.scrollWidth),
+                                height: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight),
+                                deviceScaleFactor: window.devicePixelRatio || 1,
+                                mobile: false
+                            })
+                            """,
+                            "returnByValue": True
+                        }
+                    })
+                    
+                    # Wait for dimensions response
+                    dimensions = None
+                    async for msg in ws:
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            data = json.loads(msg.data)
+                            if data.get("id") == 1:
+                                if "result" in data and "result" in data["result"]:
+                                    dimensions = data["result"]["result"].get("value", {})
+                                break
+                    
+                    if dimensions:
+                        # Set viewport to full page size
+                        await ws.send_json({
+                            "id": 2,
+                            "method": "Emulation.setDeviceMetricsOverride",
+                            "params": {
+                                "width": dimensions.get("width", 800),
+                                "height": dimensions.get("height", 600),
+                                "deviceScaleFactor": 1,
+                                "mobile": False
+                            }
+                        })
+                        
+                        # Wait for viewport response
+                        async for msg in ws:
+                            if msg.type == aiohttp.WSMsgType.TEXT:
+                                data = json.loads(msg.data)
+                                if data.get("id") == 2:
+                                    break
+                
+                # Take screenshot
+                await ws.send_json({
+                    "id": 3,
+                    "method": "Page.captureScreenshot",
+                    "params": {
+                        "format": format,
+                        "quality": quality
+                    }
+                })
+                
+                # Wait for screenshot response
+                async for msg in ws:
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        data = json.loads(msg.data)
+                        if data.get("id") == 3:
+                            if "result" in data and "data" in data["result"]:
+                                screenshot_data = data["result"]["data"]
+                                return base64.b64decode(screenshot_data)
+                            elif "error" in data:
+                                raise CDPError(f"Screenshot error: {data['error']}")
+                
+                if full_page:
+                    # Reset viewport
+                    await ws.send_json({
+                        "id": 4,
+                        "method": "Emulation.clearDeviceMetricsOverride"
+                    })
+        except Exception as e:
+            logger.error(f"Error taking screenshot: {str(e)}")
+            raise CDPError(f"Failed to take screenshot: {str(e)}")
         
-        # Decode base64 data
-        data = result.get("data", "")
-        return base64.b64decode(data)
+        raise CDPError("Failed to take screenshot: No data received")
 
     async def get_cookies(self) -> List[Dict[str, Any]]:
         """
@@ -669,7 +710,7 @@ class Page:
             raise CDPError("Not attached to page")
         
         result = await self.evaluate("document.documentElement.outerHTML")
-        return result.get("result", {}).get("value", "")
+        return result
 
     async def get_text(self) -> str:
         """
@@ -682,7 +723,7 @@ class Page:
             raise CDPError("Not attached to page")
         
         result = await self.evaluate("document.body.innerText")
-        return result.get("result", {}).get("value", "")
+        return result
 
     async def wait_for_function(self, function: str, timeout: int = 30, polling: int = 100) -> Any:
         """
