@@ -3,15 +3,15 @@
 A lightweight Python client for Chrome DevTools Protocol (CDP) on ARM64 architecture.
 
 ## Why?
-I ran into the classic “it works on my laptop” problem when migrating to a Docker Compose setup. 
+I ran into the classic "it works on my laptop" problem when migrating to a Docker Compose setup. 
 My Chrome integrations suddenly failed because Chrome was no longer supported on Linux ARM64/aarch64. 
 And docker on Mac's are ARM64 architectures... 
 Selenium web driver, which handled browser interactions, only works on x86_64, 
-so even solutions like selenium, Puppeteer, Undetectable weren’t working. 
+so even solutions like selenium, Puppeteer, Undetectable weren't working. 
 
 *I'm a huge fan of [Undetectable](https://github.com/ultrafunkamsterdam/undetected-chromedriver) and took inspiration from [nodriver](https://github.com/ultrafunkamsterdam/nodriver) for this.*
 
-The Chrome Developer Protocol (CDP) looked promising, since it exposes Chrome’s DevTools over a WebSocket and provides additional features for browser control. Unfortunately, existing CDP libraries either required a local Chrome instance—forcing your application to run in the same container — and / or relied on transpiling the CDP protocol and are currently broken...
+The Chrome Developer Protocol (CDP) looked promising, since it exposes Chrome's DevTools over a WebSocket and provides additional features for browser control. Unfortunately, existing CDP libraries either required a local Chrome instance—forcing your application to run in the same container — and / or relied on transpiling the CDP protocol and are currently broken...
 
 In the end, I had to build my own solution.
 
@@ -24,8 +24,7 @@ In the end, I had to build my own solution.
 - Headless mode support
 - Page navigation and interaction
 - JavaScript execution
-- Screenshot capture
-- Cookie management
+- Event handling
 - WebSocket proxy for remote connections
 
 ## Architecture Overview
@@ -61,41 +60,14 @@ For ARM64 compatibility and isolation, we use Docker to run Chrome:
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### Communication Flow with WebSocket Proxy
-
-```
-┌──────────┐     ┌───────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
-│          │     │           │     │          │     │          │     │          │
-│  Python  │────▶│  CDP      │────▶│ WebSocket│────▶│ Chrome   │────▶│ Webpage  │
-│  Client  │     │  Protocol │     │  Proxy   │     │ Browser  │     │          │
-│          │◀────│           │◀────│          │◀────│          │◀────│          │
-└──────────┘     └───────────┘     └──────────┘     └──────────┘     └──────────┘
-    Action         WebSocket        Forwarding       Execution        Rendering
-```
-
-## Why Docker?
-
-We use Docker for several critical reasons:
-
-1. **ARM64 Compatibility**: Ensures consistent operation on ARM64 architecture without relying on Selenium or other drivers that have compatibility issues.
-
-2. **Isolation**: Provides a clean, isolated environment for Chrome to run without interfering with the host system.
-
-3. **Reproducibility**: Guarantees the same environment across different machines and deployments.
-
-4. **Security**: Sandboxes the browser operations, limiting potential security risks.
-
-5. **Dependency Management**: Bundles all necessary dependencies in a single container, avoiding version conflicts.
-
 ## Installation
 
 ### Prerequisites
 
 - Python 3.9+
-- Poetry
 - Docker (for containerized usage)
 
-### Install with Poetry
+### Install
 
 ```bash
 # Clone the repository
@@ -103,12 +75,12 @@ git clone https://github.com/pjaol/cdp-browser.git
 cd cdp-browser
 
 # Install dependencies
-poetry install
+pip install -r requirements.txt
 ```
 
 ## Docker Usage
 
-### Recommended Approach: Using Our Custom Image
+### Using Our Custom Image
 
 The most reliable way to run Chrome with CDP support is to use our custom image:
 
@@ -117,7 +89,7 @@ The most reliable way to run Chrome with CDP support is to use our custom image:
 docker build -t cdp-browser -f docker/Dockerfile .
 
 # Run the custom image
-docker run -d -p 9222:9222 -p 9223:9223 --name cdp-browser-container cdp-browser
+docker run -d -p 9223:9223 --name cdp-browser-container cdp-browser
 ```
 
 This image includes:
@@ -131,54 +103,9 @@ This image includes:
 Our custom image includes a WebSocket proxy that allows connections from any IP address to the Chrome instance. The proxy:
 
 - Listens on port 9223
-- Forwards WebSocket connections to Chrome on port 9222
+- Forwards WebSocket connections to Chrome
 - Handles browser instance ID management
 - Provides better stability for remote connections
-
-To connect to the proxy, use port 9223 instead of 9222 in your CDP client:
-
-```python
-# Connect to the proxy
-browser = Browser("localhost", 9223)
-```
-
-### Alternative: Using browserless/chrome
-
-You can also use the browserless/chrome image directly:
-
-```bash
-# Run browserless/chrome
-docker run -d -p 9222:3000 --name browserless-chrome browserless/chrome:latest
-```
-
-This image is specifically designed to expose the Chrome DevTools Protocol and works reliably with our CDP Browser client.
-
-### How CDP Browser Interacts with Docker
-
-1. **Connection Establishment**:
-   - The CDP Browser client connects to the Chrome instance running in Docker via WebSocket
-   - Connection is made to `ws://localhost:9223/` which is forwarded to the container
-
-2. **Protocol Communication**:
-   - Commands are sent as JSON messages over the WebSocket connection
-   - Chrome executes the commands and returns responses
-
-3. **Browser Control Flow**:
-   ```
-   ┌───────────────┐     ┌───────────────┐     ┌───────────────┐     ┌───────────────┐
-   │ CDP Browser   │     │ Docker        │     │ WebSocket     │     │ Chrome        │
-   │ Client        │     │ Container     │     │ Proxy         │     │ Browser       │
-   │               │     │               │     │               │     │               │
-   │ 1. Connect    │────▶│               │────▶│               │────▶│ WebSocket     │
-   │               │     │               │     │               │     │ Server        │
-   │               │     │               │     │               │     │               │
-   │ 2. Send       │────▶│ Port          │────▶│ Forward       │────▶│ Execute       │
-   │    Command    │     │ Forwarding    │     │ Command       │     │ Command       │
-   │               │     │               │     │               │     │               │
-   │ 3. Receive    │◀────│               │◀────│               │◀────│ Return        │
-   │    Response   │     │               │     │               │     │ Result        │
-   └───────────────┘     └───────────────┘     └───────────────┘     └───────────────┘
-   ```
 
 ## Usage Examples
 
@@ -186,136 +113,84 @@ This image is specifically designed to expose the Chrome DevTools Protocol and w
 
 ```python
 import asyncio
-from cdp_browser.browser.browser import Browser
+from cdp_browser.browser import Browser
 
 async def main():
-    # Create browser instance (using the proxy port)
-    browser = Browser("localhost", 9223)
-    
-    try:
-        # Connect to browser
-        await browser.connect()
-        
+    async with Browser(port=9223) as browser:
         # Create a new page
-        page = await browser.new_page()
-        
-        # Navigate to URL
-        await page.navigate("https://example.com")
-        
-        # Print page title
-        print(f"Page title: {page.title}")
-        
-        # Take screenshot
-        screenshot_data = await page.screenshot()
-        with open("screenshot.png", "wb") as f:
-            f.write(screenshot_data)
-    finally:
-        # Disconnect from browser
-        await browser.disconnect()
+        async with await browser.create_page() as page:
+            # Navigate to URL
+            await page.navigate("https://example.com")
+            
+            # Get current URL
+            current_url = await page.get_current_url()
+            print(f"Current URL: {current_url}")
 
 # Run the example
 asyncio.run(main())
 ```
 
-### Using the Chrome DevTools Protocol Directly
-
-For more advanced operations, you can use the CDP protocol directly:
+### Form Interaction Example
 
 ```python
 import asyncio
-import aiohttp
-import base64
-
-async def take_screenshot(url):
-    # Connect to the proxy
-    async with aiohttp.ClientSession() as session:
-        # Get available targets
-        async with session.get("http://localhost:9223/json/list") as response:
-            targets = await response.json()
-            target = targets[0]
-            
-            # Connect to the target via WebSocket
-            ws_url = target["webSocketDebuggerUrl"]
-            async with session.ws_connect(ws_url) as ws:
-                # Navigate to the URL
-                await ws.send_json({
-                    "id": 1,
-                    "method": "Page.navigate",
-                    "params": {"url": url}
-                })
-                
-                # Wait for navigation to complete
-                while True:
-                    msg = await ws.receive_json()
-                    if msg.get("id") == 1:
-                        break
-                
-                # Wait a bit for the page to render
-                await asyncio.sleep(1)
-                
-                # Capture screenshot
-                await ws.send_json({
-                    "id": 2,
-                    "method": "Page.captureScreenshot",
-                    "params": {"format": "png", "quality": 100}
-                })
-                
-                # Wait for screenshot response
-                while True:
-                    msg = await ws.receive_json()
-                    if msg.get("id") == 2:
-                        return base64.b64decode(msg["result"]["data"])
+from cdp_browser.browser import Browser
 
 async def main():
-    screenshot = await take_screenshot("https://example.com")
-    with open("screenshot.png", "wb") as f:
-        f.write(screenshot)
+    async with Browser(port=9223) as browser:
+        async with await browser.create_page() as page:
+            # Navigate to login page
+            await page.navigate("https://www.saucedemo.com/")
+            
+            # Type username and password
+            await page.type("#user-name", "standard_user")
+            await page.type("#password", "secret_sauce")
+            
+            # Click login button
+            await page.click("#login-button")
+            
+            # Wait for navigation
+            await page.wait_for_navigation()
+            
+            # Get current URL
+            current_url = await page.get_current_url()
+            print(f"Current URL after login: {current_url}")
 
+# Run the example
 asyncio.run(main())
 ```
 
-### Command Line Interface
+### Multiple Pages Example
 
-```bash
-# Navigate to a URL
-python -m cdp_browser.main https://example.com
+```python
+import asyncio
+from cdp_browser.browser import Browser
 
-# Take a screenshot
-python -m cdp_browser.main https://example.com --screenshot screenshot.png
+async def main():
+    async with Browser(port=9223) as browser:
+        # Create multiple pages
+        page1 = await browser.create_page()
+        page2 = await browser.create_page()
+        
+        # Navigate pages independently
+        await page1.navigate("https://example.com")
+        await page2.navigate("https://www.example.org")
+        
+        # Get URLs
+        url1 = await page1.get_current_url()
+        url2 = await page2.get_current_url()
+        
+        print(f"Page 1 URL: {url1}")
+        print(f"Page 2 URL: {url2}")
+        
+        # Close pages
+        await page1.close()
+        await page2.close()
 
-# Use a proxy
-python -m cdp_browser.main https://example.com --proxy http://user:pass@host:port
-
-# Enable debug logging
-python -m cdp_browser.main https://example.com --debug
+# Run the example
+asyncio.run(main())
 ```
 
-## Development
+## Contributing
 
-### Running Tests
-
-```bash
-# Run all tests
-poetry run pytest
-
-# Run tests with Chrome available
-CHROME_AVAILABLE=1 poetry run pytest
-```
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Connection Refused**: Ensure the Docker container is running and port 9222 is properly exposed.
-
-2. **Empty Response**: Check if Chrome is binding to the correct address inside the container.
-
-3. **Protocol Errors**: Verify that the Chrome version in the container supports the CDP commands you're using.
-
-4. **Port Conflicts**: If port 9222 is already in use, you can use a different port by changing the port mapping in the Docker run command.
-
-5. **ARM64 Compatibility**: If you're running on ARM64 architecture, make sure to use the ARM64 version of the browserless/chrome image.
-
-## License
-
-MIT
+Contributions are welcome! Please feel free to submit a Pull Request.
