@@ -212,3 +212,6 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Fingerprinting results and screenshots
+fingerprint_results/
