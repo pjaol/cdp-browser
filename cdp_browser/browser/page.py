@@ -267,6 +267,7 @@ class Page:
         context = params.get("context", {})
         if context.get("auxData", {}).get("isDefault"):
             self._execution_context_id = context.get("id")
+            self.logger.debug(f"Updated execution context ID to: {self._execution_context_id}")
 
     async def _handle_navigation_requested(self, params: Dict) -> None:
         """Handle navigation requested event."""
@@ -389,6 +390,8 @@ class Page:
                             logger.debug(f"Session {self.session_id} already detached")
                         else:
                             logger.error(f"Error detaching from target: {e}")
+                else:
+                    logger.debug("No session ID available for detaching from target")
 
                 # Close target after detaching (or trying to)
                 try:
@@ -757,20 +760,17 @@ class Page:
 
     async def evaluate(self, expression: str, await_promise: bool = True) -> Any:
         """
-        Evaluate JavaScript code in the context of the current page.
-
+        Evaluate JavaScript code in the context of the page.
+        
         Args:
-            expression: The JavaScript code to evaluate.
-            await_promise: Whether to await any promises in the result.
-
+            expression: JavaScript expression or function to evaluate
+            await_promise: Whether to wait for any promise to resolve
+            
         Returns:
-            The result of the evaluation.
-
-        Raises:
-            PageError: If the evaluation fails.
+            The result of the expression
         """
         try:
-            # First evaluate to get the function
+            # First try simple evaluation with Runtime.evaluate
             raw_result = await self.send_command(
                 "Runtime.evaluate",
                 {
@@ -784,7 +784,13 @@ class Page:
             # If we got a function, execute it in the current context
             if raw_result.get("result", {}).get("type") == "function":
                 if not self._execution_context_id:
-                    raise PageError("No execution context found")
+                    # If we don't have an execution context ID, try reloading the page
+                    self.logger.warning("No execution context found, attempting to reload page")
+                    await self.send_command("Page.reload")
+                    await asyncio.sleep(3)  # Wait for page to reload
+                    
+                    # Try evaluating again after reload
+                    return await self.evaluate(expression, await_promise)
 
                 raw_result = await self.send_command(
                     "Runtime.callFunctionOn",
@@ -820,6 +826,15 @@ class Page:
 
         except Exception as e:
             self.logger.error(f"Error evaluating JavaScript: {e}")
+            # If we got an execution context error, try refreshing the page and evaluating again
+            if "execution context" in str(e).lower() and "Cannot find context" in str(e):
+                self.logger.warning("Execution context error, trying to reload page and retry evaluation")
+                try:
+                    await self.send_command("Page.reload")
+                    await asyncio.sleep(3)  # Wait for page to reload
+                    return await self.evaluate(expression, await_promise)
+                except Exception as retry_error:
+                    self.logger.error(f"Retry evaluation failed: {retry_error}")
             raise
 
     async def type(self, selector: str, text: str) -> None:

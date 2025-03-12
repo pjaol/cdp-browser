@@ -38,6 +38,11 @@ class StealthBrowser(Browser):
             await page.send_command("Page.enable")
             await page.send_command("Runtime.enable")
             
+            # Navigate to blank page to establish a clean execution context
+            logger.debug("Navigating to blank page to establish execution context...")
+            await page.navigate("about:blank")
+            await asyncio.sleep(1)  # Give time for context to be created
+            
             # Apply stealth patches
             logger.debug("Applying stealth patches...")
             await self._apply_stealth_patches(page)

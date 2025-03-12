@@ -191,6 +191,49 @@ async def main():
 asyncio.run(main())
 ```
 
+## Stealth Mode
+
+The CDP Browser includes a stealth mode that helps avoid detection by fingerprinting services. The stealth mode is implemented in the `StealthBrowser` class and includes various techniques to avoid detection:
+
+### Features
+
+- Chrome runtime emulation
+- WebDriver property removal
+- User agent spoofing
+- Window size customization
+- Language preferences
+
+### Testing Against Fingerprinting Services
+
+The stealth mode has been tested against popular fingerprinting services:
+
+1. **CreepJS** - A comprehensive browser fingerprinting tool
+   - Test results are saved in the `fingerprint_results` directory
+   - Screenshots and HTML content are captured for analysis
+
+2. **Fingerprint.js Pro** - A commercial fingerprinting service
+   - Tests are marked as experimental due to potential WebSocket connection issues
+
+### Running Fingerprinting Tests
+
+```bash
+CHROME_AVAILABLE=1 PYTHONPATH=. pytest -vs tests/test_stealth_fingerprint.py
+```
+
+### Current Status
+
+The stealth mode successfully avoids basic bot detection, but some advanced fingerprinting techniques can still detect automation:
+
+- WebDriver property is detected as "on" by CreepJS
+- Worker user agent is detected as headless
+
+### Future Improvements
+
+- Improve WebDriver property spoofing
+- Fix worker user agent detection
+- Add more sophisticated browser behavior emulation
+- Implement additional stealth techniques for specific fingerprinting services
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
