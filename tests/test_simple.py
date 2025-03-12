@@ -2,6 +2,7 @@
 import logging
 import pytest
 from cdp_browser.browser import Browser
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -44,20 +45,39 @@ async def test_page_interaction():
     logger.info("Starting page interaction test")
     async with Browser(port=9223) as browser:
         async with await browser.create_page() as page:
-            # Navigate to test site
-            await page.navigate("https://www.saucedemo.com/")
-            
-            # Type username and password
-            await page.type("#user-name", "standard_user")
-            await page.type("#password", "secret_sauce")
-            
-            # Click login button
-            await page.click("#login-button")
-            
-            # Wait for navigation and verify URL
-            await page.wait_for_navigation()
-            current_url = await page.get_current_url()
-            assert current_url == "https://www.saucedemo.com/inventory.html"
+            try:
+                # Navigate to test site
+                logger.debug("Navigating to saucedemo.com")
+                await asyncio.wait_for(
+                    page.navigate("https://www.saucedemo.com/", wait_until="networkidle"), 
+                    timeout=5.0
+                )
+                
+                # Type username and password
+                logger.debug("Typing credentials")
+                await asyncio.wait_for(page.type("#user-name", "standard_user"), timeout=2.0)
+                await asyncio.wait_for(page.type("#password", "secret_sauce"), timeout=2.0)
+                
+                # Click login button with networkidle waiting strategy
+                logger.debug("Clicking login button")
+                await asyncio.wait_for(
+                    page.click("#login-button", wait_until="networkidle"), 
+                    timeout=5.0
+                )
+                
+                # No need to wait for navigation separately as click is already doing it
+                
+                # Verify we reached the inventory page
+                current_url = await page.get_current_url()
+                logger.debug(f"Final URL after login: {current_url}")
+                assert current_url == "https://www.saucedemo.com/inventory.html"
+                
+            except asyncio.TimeoutError as e:
+                logger.error(f"Timeout during page interaction: {e}")
+                # Get navigation state for debugging
+                nav_state = page._navigation_state if hasattr(page, '_navigation_state') else 'Unknown'
+                logger.error(f"Navigation state: {nav_state}")
+                raise
 
 @pytest.mark.asyncio
 async def test_multiple_pages():
