@@ -1,25 +1,27 @@
 # CDP Browser
 
-A lightweight Python client for Chrome DevTools Protocol (CDP) on ARM64 architecture.
+A lightweight Python client for Chrome DevTools Protocol (CDP).
+*also works on ARM64 architecture*
 
 ## Why?
 I ran into the classic "it works on my laptop" problem when migrating to a Docker Compose setup. 
 My Chrome integrations suddenly failed because Chrome was no longer supported on Linux ARM64/aarch64. 
 And docker on Mac's are ARM64 architectures... 
-Selenium web driver, which handled browser interactions, only works on x86_64, 
+Selenium web driver, which handled browser interactions, only works on x86_64, or macos
 so even solutions like selenium, Puppeteer, Undetectable weren't working. 
 
-*I'm a huge fan of [Undetectable](https://github.com/ultrafunkamsterdam/undetected-chromedriver) and took inspiration from [nodriver](https://github.com/ultrafunkamsterdam/nodriver) for this.*
+*BTW I'm a huge fan of [Undetectable](https://github.com/ultrafunkamsterdam/undetected-chromedriver) and took inspiration from [nodriver](https://github.com/ultrafunkamsterdam/nodriver) for this.*
 
 The Chrome Developer Protocol (CDP) looked promising, since it exposes Chrome's DevTools over a WebSocket and provides additional features for browser control. Unfortunately, existing CDP libraries either required a local Chrome instance—forcing your application to run in the same container — and / or relied on transpiling the CDP protocol and are currently broken...
 
 In the end, I had to build my own solution.
+This is a lesson in DON'T DO WHAT I DID!
 
 ## Features
 
 - Direct Chrome DevTools Protocol (CDP) communication
 - No Selenium dependencies
-- ARM64 compatibility
+- ARM64 compatibility (will work with any chrome)
 - Proxy support
 - Headless mode support
 - Page navigation and interaction
@@ -224,6 +226,16 @@ The stealth mode has been tested against multiple fingerprinting and bot detecti
    - Our implementation can't yet bypass Cloudflare's Turnstile CAPTCHA system
    - Results provide valuable insights into improving stealth capabilities
 
+#### Fingerprinting Test Results
+
+| Service | Test URL | Result | Notes |
+|---------|----------|--------|-------|
+| CreepJS | https://abrahamjuliot.github.io/creepjs/ | ⚠️ Partially Detected | - WebDriver property detected<br>- Worker user agent flagged<br>- Most other checks pass |
+| Fingerprint.js Pro | https://fingerprint.com/demo/ | ⚠️ Partially Detected | - Some inconsistencies detected<br>- Connection issues during testing |
+| Cloudflare (Basic) | https://www.cloudflare.com/ | ✅ Passes | Most basic Cloudflare-protected sites pass |
+| Cloudflare Challenge | https://www.scrapingcourse.com/cloudflare-challenge | ❌ Detected | Turnstile CAPTCHA challenge triggered |
+| Browser Leak Test | https://browserleaks.com/javascript | ⚠️ Mixed Results | - Most tests pass<br>- Some canvas fingerprinting issues |
+
 ### Running Fingerprinting Tests
 
 ```bash
@@ -232,12 +244,33 @@ CHROME_AVAILABLE=1 PYTHONPATH=. pytest -vs tests/test_stealth_fingerprint.py
 
 ### Current Status
 
-The stealth mode successfully avoids basic bot detection, but some advanced fingerprinting techniques can still detect automation:
+#### Stealth Features Status Table
 
-- WebDriver property is detected as "on" by some fingerprinting services
-- Worker user agent is sometimes detected as headless
-- Cloudflare's Turnstile CAPTCHA system can detect our automation
-- Specific JavaScript challenge responses require further improvement
+| Feature/Capability | Description | Status |
+|-------------------|-------------|--------|
+| WebDriver Property | Hiding the `navigator.webdriver` property | ⚠️ Partially Working |
+| Chrome Runtime | Emulating Chrome browser runtime | ✅ Working |
+| User Agent Spoofing | Setting realistic user agents | ✅ Working |
+| Window Size | Customizing window dimensions | ✅ Working |
+| Languages | Setting browser language preferences | ✅ Working |
+| Plugins | Emulating browser plugins | ✅ Working |
+| Worker User Agent | Consistent user agent in Web Workers | ⚠️ Partially Working |
+| Function Prototypes | Fixing modified function signatures | ✅ Working |
+| iFrame Handling | Consistent behavior in iframes | ⚠️ Partially Working |
+| JavaScript Challenge Response | Solving JS-based challenges | ❌ Needs Improvement |
+| Mouse/Keyboard Behavior | Emulating human-like input patterns | ❌ Not Implemented Yet |
+| Cloudflare Turnstile | Bypassing Cloudflare's CAPTCHA system | ❌ Not Working |
+| Browser Fingerprinting | Avoiding canvas, WebGL, font detection | ⚠️ Partial |
+| TLS Fingerprinting | Mimicking browser TLS signatures | ❌ Not Implemented Yet |
+| Audio/Canvas Fingerprinting | Evading audio/canvas fingerprinting | ⚠️ Partially Working |
+
+While our stealth mode successfully avoids basic bot detection, some advanced fingerprinting techniques can still detect automation:
+
+- CreepJS detects the WebDriver property as "on"
+- Worker user agent is detected as headless
+- Some advanced fingerprinting services can detect inconsistencies
+
+The implementation provides a good foundation but requires further enhancements to bypass more sophisticated detection mechanisms like Cloudflare's Turnstile CAPTCHA.
 
 ### Stealth Mode Examples
 
