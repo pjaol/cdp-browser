@@ -202,17 +202,27 @@ The CDP Browser includes a stealth mode that helps avoid detection by fingerprin
 - User agent spoofing
 - Window size customization
 - Language preferences
+- Plugin and extension emulation
+- Function prototype integrity preservation
+- Advanced iframe handling
 
 ### Testing Against Fingerprinting Services
 
-The stealth mode has been tested against popular fingerprinting services:
+The stealth mode has been tested against multiple fingerprinting and bot detection services:
 
 1. **CreepJS** - A comprehensive browser fingerprinting tool
    - Test results are saved in the `fingerprint_results` directory
    - Screenshots and HTML content are captured for analysis
+   - Our stealth mode successfully avoids many basic fingerprinting techniques
 
 2. **Fingerprint.js Pro** - A commercial fingerprinting service
    - Tests are marked as experimental due to potential WebSocket connection issues
+   - Current implementation can be detected by advanced fingerprinting techniques
+
+3. **Cloudflare Challenge** - One of the most sophisticated bot detection systems
+   - Tests against specific Cloudflare challenge pages show current limitations
+   - Our implementation can't yet bypass Cloudflare's Turnstile CAPTCHA system
+   - Results provide valuable insights into improving stealth capabilities
 
 ### Running Fingerprinting Tests
 
@@ -224,15 +234,45 @@ CHROME_AVAILABLE=1 PYTHONPATH=. pytest -vs tests/test_stealth_fingerprint.py
 
 The stealth mode successfully avoids basic bot detection, but some advanced fingerprinting techniques can still detect automation:
 
-- WebDriver property is detected as "on" by CreepJS
-- Worker user agent is detected as headless
+- WebDriver property is detected as "on" by some fingerprinting services
+- Worker user agent is sometimes detected as headless
+- Cloudflare's Turnstile CAPTCHA system can detect our automation
+- Specific JavaScript challenge responses require further improvement
+
+### Stealth Mode Examples
+
+See the examples directory for practical applications of stealth mode:
+
+- `examples/stealth_mode.py` - Basic stealth mode usage against fingerprinting
+- `examples/cloudflare_test.py` - Testing against Cloudflare's bot detection
 
 ### Future Improvements
 
-- Improve WebDriver property spoofing
-- Fix worker user agent detection
-- Add more sophisticated browser behavior emulation
-- Implement additional stealth techniques for specific fingerprinting services
+- Enhanced WebDriver property spoofing
+- Worker user agent fixes
+- More sophisticated browser behavior emulation
+- Improved handling of advanced JavaScript challenges
+- Human-like mouse movement and interaction patterns
+- Network fingerprint normalization
+- TLS fingerprint matching
+- Enhanced iframe and worker context handling
+
+## Examples
+
+The `examples` directory contains several examples demonstrating how to use CDP Browser:
+
+- `simple_navigation.py` - Demonstrates basic page navigation
+- `form_interaction.py` - Shows how to interact with forms
+- `stealth_mode.py` - Demonstrates the stealth mode capabilities against fingerprinting
+- `cloudflare_test.py` - Tests the stealth mode against Cloudflare's bot detection
+
+To run an example:
+
+```bash
+# Make sure Chrome is running with CDP enabled
+# Run a specific example
+python examples/simple_navigation.py
+```
 
 ## Contributing
 

@@ -754,3 +754,282 @@ async def apply_advanced_stealth_patches(browser):
         logger.error(f"Error applying advanced stealth patches: {e}")
     finally:
         await page.close() 
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(reason="Specific Cloudflare challenge sites are expected to detect bots")
+async def test_cloudflare_specific_challenge(advanced_stealth_browser):
+    """Test against a specific Cloudflare challenge page designed to detect bots."""
+    print("\n===== Starting Specific Cloudflare Challenge Test =====")
+    logger.info("Starting specific Cloudflare challenge test")
+    
+    # Apply additional patches based on Intoli research
+    print("Applying advanced stealth patches...")
+    await apply_advanced_stealth_patches(advanced_stealth_browser)
+    
+    print("Creating page...")
+    page = await advanced_stealth_browser.create_page()
+    
+    # Create results to gather data even if we encounter errors
+    cloudflare_results = {
+        "htmlCaptured": False,
+        "challengeDetected": False,
+        "title": "Unknown",
+        "currentUrl": "Unknown",
+        "cfCookies": [],
+        "cloudflareInfo": {},
+        "botDetection": {
+            "detected": False,
+            "indicators": []
+        }
+    }
+    
+    try:
+        # Navigate to the specific Cloudflare challenge site
+        print("Navigating to specific Cloudflare challenge site...")
+        logger.info("Navigating to specific Cloudflare challenge site")
+        await page.navigate("https://www.scrapingcourse.com/cloudflare-challenge")
+        print("Navigation initiated.")
+        
+        # Wait a shorter time before taking initial data to avoid WebSocket issues
+        print("Waiting 2 seconds...")
+        await asyncio.sleep(2)
+        print("Wait completed.")
+        
+        # Capture a screenshot early to avoid losing it due to WebSocket issues
+        try:
+            print("Taking early screenshot...")
+            logger.info("Taking an early screenshot")
+            screenshot_base64 = await asyncio.wait_for(
+                page.send_command("Page.captureScreenshot"),
+                timeout=5.0
+            )
+            screenshot_data = screenshot_base64.get("data", "")
+            if screenshot_data:
+                os.makedirs("fingerprint_results", exist_ok=True)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                screenshot_path = f"fingerprint_results/cf_challenge_early_{timestamp}.png"
+                with open(screenshot_path, "wb") as f:
+                    import base64
+                    f.write(base64.b64decode(screenshot_data))
+                print(f"Early screenshot saved to {screenshot_path}")
+                logger.info(f"Early screenshot saved to {screenshot_path}")
+        except Exception as screenshot_error:
+            print(f"❌ Failed to capture early screenshot: {screenshot_error}")
+            logger.error(f"Failed to capture early screenshot: {screenshot_error}")
+            
+        # Get initial page content with timeout
+        try:
+            print("Getting initial page content...")
+            logger.info("Getting initial page content")
+            content_result = await asyncio.wait_for(
+                page.send_command(
+                    "Runtime.evaluate",
+                    {
+                        "expression": "document.documentElement.outerHTML",
+                        "returnByValue": True,
+                    }
+                ),
+                timeout=5.0
+            )
+            
+            html_content = content_result.get("result", {}).get("value", "")
+            print(f"HTML content length: {len(html_content)}")
+            
+            # Save the initial HTML content
+            if html_content:
+                html_file = f"fingerprint_results/cf_challenge_html_early_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+                with open(html_file, 'w', encoding='utf-8') as f:
+                    f.write(html_content)
+                print(f"Initial HTML content saved to {html_file}")
+                logger.info(f"Initial HTML content saved to {html_file}")
+                cloudflare_results["htmlCaptured"] = True
+                
+                # Try to extract title from HTML
+                if "<title>" in html_content and "</title>" in html_content:
+                    cloudflare_results["title"] = html_content.split("<title>")[1].split("</title>")[0]
+                    print(f"Page title: {cloudflare_results['title']}")
+                    
+                # Check for Cloudflare challenge indicators
+                cloudflare_indicators = [
+                    "cf-browser-verification",
+                    "cf_captcha_container",
+                    "cf-challenge",
+                    "cloudflare-challenge",
+                    "security challenge",
+                    "ray id",
+                    "checking your browser",
+                    "just a moment",
+                    "challenge-running",
+                    "challenge-form",
+                    "clearance"
+                ]
+                
+                detected_indicators = [indicator for indicator in cloudflare_indicators 
+                                      if indicator in html_content.lower()]
+                
+                challenge_detected = len(detected_indicators) > 0
+                cloudflare_results["challengeDetected"] = challenge_detected
+                cloudflare_results["botDetection"]["detected"] = challenge_detected
+                cloudflare_results["botDetection"]["indicators"] = detected_indicators
+                
+                if detected_indicators:
+                    print(f"⚠️ Detected Cloudflare indicators: {detected_indicators}")
+                else:
+                    print("✅ No Cloudflare challenge indicators detected")
+                
+                # Save early results in case we encounter errors later
+                early_results_file = save_results("cf_challenge_early_data", cloudflare_results)
+                print(f"Early results saved to {early_results_file}")
+                logger.info(f"Saved early Cloudflare challenge results to {early_results_file}")
+        except Exception as content_error:
+            print(f"❌ Error extracting initial page content: {content_error}")
+            logger.error(f"Error extracting initial page content: {content_error}")
+        
+        # Try to get current URL
+        try:
+            cloudflare_results["currentUrl"] = await asyncio.wait_for(
+                page.get_current_url(),
+                timeout=3.0
+            )
+            print(f"Current URL: {cloudflare_results['currentUrl']}")
+        except Exception as url_error:
+            print(f"❌ Error getting current URL: {url_error}")
+            logger.error(f"Error getting current URL: {url_error}")
+        
+        # Wait longer for Cloudflare challenge to complete
+        print("Waiting for Cloudflare challenge to complete...")
+        logger.info("Waiting for Cloudflare challenge to complete...")
+        await asyncio.sleep(10)  # Give more time for the challenge
+        
+        # Take a final screenshot
+        try:
+            print("Taking final screenshot...")
+            logger.info("Taking final screenshot")
+            screenshot_base64 = await asyncio.wait_for(
+                page.send_command("Page.captureScreenshot"),
+                timeout=5.0
+            )
+            screenshot_data = screenshot_base64.get("data", "")
+            if screenshot_data:
+                os.makedirs("fingerprint_results", exist_ok=True)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                screenshot_path = f"fingerprint_results/cf_challenge_final_{timestamp}.png"
+                with open(screenshot_path, "wb") as f:
+                    import base64
+                    f.write(base64.b64decode(screenshot_data))
+                print(f"Final screenshot saved to {screenshot_path}")
+                logger.info(f"Final screenshot saved to {screenshot_path}")
+        except Exception as screenshot_error:
+            print(f"❌ Failed to capture final screenshot: {screenshot_error}")
+            logger.error(f"Failed to capture final screenshot: {screenshot_error}")
+        
+        # Get final page content to see if we passed the challenge
+        try:
+            print("Getting final page content...")
+            logger.info("Getting final page content")
+            content_result = await asyncio.wait_for(
+                page.send_command(
+                    "Runtime.evaluate",
+                    {
+                        "expression": "document.documentElement.outerHTML",
+                        "returnByValue": True,
+                    }
+                ),
+                timeout=5.0
+            )
+            
+            html_content = content_result.get("result", {}).get("value", "")
+            print(f"Final HTML content length: {len(html_content)}")
+            
+            # Save the final HTML content
+            if html_content:
+                html_file = f"fingerprint_results/cf_challenge_html_final_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+                with open(html_file, 'w', encoding='utf-8') as f:
+                    f.write(html_content)
+                print(f"Final HTML content saved to {html_file}")
+                logger.info(f"Final HTML content saved to {html_file}")
+                
+                # Check if we passed the challenge
+                challenge_passed = "You've passed the Cloudflare challenge" in html_content
+                if challenge_passed:
+                    print("✅ PASSED: Successfully bypassed Cloudflare challenge!")
+                    logger.info("Successfully bypassed Cloudflare challenge!")
+                else:
+                    print("❌ FAILED: Could not bypass Cloudflare challenge")
+                    logger.warning("Could not bypass Cloudflare challenge")
+                
+                cloudflare_results["challengePassed"] = challenge_passed
+                
+                # Update challenge detection in the results
+                cloudflare_indicators = [
+                    "cf-browser-verification",
+                    "cf_captcha_container",
+                    "cf-challenge",
+                    "cloudflare-challenge",
+                    "security challenge",
+                    "ray id",
+                    "checking your browser",
+                    "just a moment",
+                    "challenge-running",
+                    "challenge-form",
+                    "clearance"
+                ]
+                
+                detected_indicators = [indicator for indicator in cloudflare_indicators 
+                                      if indicator in html_content.lower()]
+                
+                challenge_detected = len(detected_indicators) > 0
+                cloudflare_results["challengeDetected"] = challenge_detected
+                cloudflare_results["botDetection"]["detected"] = challenge_detected
+                cloudflare_results["botDetection"]["indicators"] = detected_indicators
+                
+                # Extract more details from the page
+                try:
+                    # Check if we can identify what specific checks failed
+                    detection_reasons = []
+                    
+                    # Common bot detection patterns
+                    if "headless" in html_content.lower():
+                        detection_reasons.append("headless browser detected")
+                    
+                    if "webdriver" in html_content.lower():
+                        detection_reasons.append("webdriver detected")
+                    
+                    if "automation" in html_content.lower():
+                        detection_reasons.append("automation detected")
+                    
+                    if "bot" in html_content.lower() and "detected" in html_content.lower():
+                        detection_reasons.append("bot keyword detected")
+                    
+                    cloudflare_results["detectionReasons"] = detection_reasons
+                    
+                    if detection_reasons:
+                        print(f"⚠️ Detected reasons for failure: {detection_reasons}")
+                    
+                except Exception as parse_error:
+                    print(f"❌ Error parsing detection details: {parse_error}")
+                    logger.error(f"Error parsing detection details: {parse_error}")
+                
+            else:
+                print("❌ No HTML content in final page")
+                logger.error("No HTML content in final page")
+        
+        except Exception as content_error:
+            print(f"❌ Error extracting final page content: {content_error}")
+            logger.error(f"Error extracting final page content: {content_error}")
+        
+    except Exception as e:
+        print(f"❌ Error during Cloudflare challenge test: {e}")
+        logger.error(f"Error during Cloudflare challenge test: {e}")
+    finally:
+        # Save whatever results we've gathered
+        results_file = save_results("cf_challenge_results", cloudflare_results)
+        print(f"Results saved to {results_file}")
+        logger.info(f"Saved Cloudflare challenge results to {results_file}")
+        
+        # Close the page
+        try:
+            await page.close()
+        except Exception as close_error:
+            print(f"❌ Error closing page: {close_error}")
+            logger.error(f"Error closing page: {close_error}") 
