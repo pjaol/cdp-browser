@@ -1,13 +1,14 @@
 """
 StealthBrowser implementation for anti-detection.
 """
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import logging
 import asyncio
 
 from ..browser import Browser
 from ..page import Page
 from .profile import StealthProfile
+from .patches import get_ordered_patches
 
 logger = logging.getLogger(__name__)
 
@@ -47,332 +48,6 @@ class StealthBrowser(Browser):
             logger.debug("Applying stealth patches...")
             await self._apply_stealth_patches(page)
             
-            logger.debug("Successfully created stealth page")
-            return page
-            
-        except Exception as e:
-            logger.error(f"Error setting up stealth page: {e}")
-            try:
-                await page.close()
-            except Exception as close_error:
-                logger.error(f"Error closing page after setup failure: {close_error}")
-            raise RuntimeError(f"Failed to setup stealth page: {e}")
-    
-    async def _apply_stealth_patches(self, page: Page) -> None:
-        """Apply all stealth patches to a page."""
-        try:
-            logger.debug("Applying stealth patches...")
-            
-            # First, apply core Chrome runtime patches
-            await page.send_command("Page.addScriptToEvaluateOnNewDocument", {
-                "source": """
-                    // Core Chrome runtime setup
-                    (() => {
-                        const originalFunction = window.Function;
-                        const originalToString = Function.prototype.toString;
-                        
-                        // Helper to make functions look native
-                        const makeNativeFunction = (fn, name = '') => {
-                            const wrapped = originalFunction('return ' + fn)();
-                            Object.defineProperty(wrapped, 'name', { value: name });
-                            Object.defineProperty(wrapped, 'toString', {
-                                value: () => `function ${name || fn.name || ''}() { [native code] }`,
-                                configurable: true,
-                                writable: true
-                            });
-                            return wrapped;
-                        };
-
-                        // Create runtime object first
-                        const runtime = {};
-
-                        // Set up prototype chain
-                        Object.setPrototypeOf(runtime, EventTarget.prototype);
-
-                        // Define runtime methods
-                        const runtimeMethods = {
-                            getURL: function getURL(path) { return 'chrome-extension://' + this.id + '/' + path; },
-                            reload: function reload() {},
-                            requestUpdateCheck: function requestUpdateCheck(callback) {
-                                const result = { status: 'no_update' };
-                                if (callback) callback(result);
-                                return Promise.resolve(result);
-                            },
-                            getPlatformInfo: function getPlatformInfo(callback) {
-                                const info = { os: 'mac', arch: 'x86-64', nacl_arch: 'x86-64' };
-                                if (callback) callback(info);
-                                return Promise.resolve(info);
-                            },
-                            connect: function connect() { return {}; },
-                            sendMessage: function sendMessage() {},
-                            getManifest: function getManifest() { return {}; }
-                        };
-
-                        // Add methods to runtime object
-                        for (const [name, fn] of Object.entries(runtimeMethods)) {
-                            Object.defineProperty(runtime, name, {
-                                value: makeNativeFunction(fn, name),
-                                writable: false,
-                                enumerable: true,
-                                configurable: true
-                            });
-                        }
-
-                        // Add event handling methods
-                        const eventMethods = ['addEventListener', 'removeEventListener', 'dispatchEvent'];
-                        eventMethods.forEach(method => {
-                            Object.defineProperty(runtime, method, {
-                                value: EventTarget.prototype[method],
-                                writable: false,
-                                enumerable: false,
-                                configurable: true
-                            });
-                        });
-
-                        // Define runtime properties
-                        Object.defineProperties(runtime, {
-                            id: {
-                                value: 'chrome-extension',
-                                writable: false,
-                                enumerable: true,
-                                configurable: false
-                            },
-                            lastError: {
-                                value: undefined,
-                                writable: true,
-                                enumerable: true,
-                                configurable: true
-                            },
-                            OnInstalledReason: {
-                                value: { CHROME_UPDATE: 'chrome_update', INSTALL: 'install', UPDATE: 'update' },
-                                writable: false,
-                                enumerable: true,
-                                configurable: false
-                            },
-                            OnRestartRequiredReason: {
-                                value: { APP_UPDATE: 'app_update', OS_UPDATE: 'os_update', PERIODIC: 'periodic' },
-                                writable: false,
-                                enumerable: true,
-                                configurable: false
-                            },
-                            PlatformArch: {
-                                value: { ARM: 'arm', ARM64: 'arm64', X86_32: 'x86-32', X86_64: 'x86-64' },
-                                writable: false,
-                                enumerable: true,
-                                configurable: false
-                            },
-                            PlatformOs: {
-                                value: { ANDROID: 'android', CROS: 'cros', LINUX: 'linux', MAC: 'mac', WIN: 'win' },
-                                writable: false,
-                                enumerable: true,
-                                configurable: false
-                            }
-                        });
-
-                        // Make runtime properties look native
-                        Object.defineProperty(runtime, Symbol.toStringTag, { value: 'ChromeRuntimeObject' });
-
-                        // Setup window.chrome with proper prototypes
-                        const chrome = {
-                            app: {
-                                InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' },
-                                RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' },
-                                getDetails: makeNativeFunction(function getDetails() { return {}; }, 'getDetails'),
-                                getIsInstalled: makeNativeFunction(function getIsInstalled() { return false; }, 'getIsInstalled'),
-                                installState: makeNativeFunction(function installState() { return 'not_installed'; }, 'installState'),
-                                isInstalled: false,
-                                window: {
-                                    get current() { return null; },
-                                    create: makeNativeFunction(function create() { return {}; }, 'create'),
-                                    getAll: makeNativeFunction(function getAll() { return []; }, 'getAll')
-                                }
-                            },
-                            runtime: runtime,
-                            csi: makeNativeFunction(function csi() {
-                                return {
-                                    startE: Date.now(),
-                                    onloadT: Date.now(),
-                                    pageT: Date.now(),
-                                    tran: 15
-                                };
-                            }, 'csi'),
-                            loadTimes: makeNativeFunction(function loadTimes() {
-                                return {
-                                    commitLoadTime: Date.now() / 1000,
-                                    connectionInfo: "h2",
-                                    finishDocumentLoadTime: Date.now() / 1000,
-                                    finishLoadTime: Date.now() / 1000,
-                                    firstPaintAfterLoadTime: Date.now() / 1000,
-                                    firstPaintTime: Date.now() / 1000,
-                                    navigationType: "Other",
-                                    npnNegotiatedProtocol: "h2",
-                                    requestTime: Date.now() / 1000,
-                                    startLoadTime: Date.now() / 1000,
-                                    wasAlternateProtocolAvailable: false,
-                                    wasFetchedViaSpdy: true,
-                                    wasNpnNegotiated: true
-                                };
-                            }, 'loadTimes')
-                        };
-                        
-                        // Make chrome properties look native
-                        Object.defineProperty(chrome, Symbol.toStringTag, { value: 'Chrome' });
-                        
-                        // Ensure chrome is properly initialized with non-configurable runtime
-                        Object.defineProperty(window, 'chrome', {
-                            value: chrome,
-                            configurable: false,
-                            enumerable: true,
-                            writable: false
-                        });
-
-                        // Ensure webdriver is completely removed
-                        try {
-                            Object.defineProperty(Object.getPrototypeOf(navigator), 'webdriver', {
-                                get: () => undefined,
-                                configurable: true,
-                                enumerable: true
-                            });
-                        } catch (e) {
-                            // If we can't modify the prototype, try direct property
-                            Object.defineProperty(navigator, 'webdriver', {
-                                get: () => undefined,
-                                configurable: true,
-                                enumerable: true
-                            });
-                        }
-                        
-                        // Additional cleanup for webdriver
-                        if (navigator.webdriver === undefined) {
-                            delete navigator.webdriver;
-                        }
-                    })();
-                """
-            })
-            
-            # Apply navigator patches
-            await page.send_command("Page.addScriptToEvaluateOnNewDocument", {
-                "source": """
-                    (() => {
-                        // Navigator properties
-                        const navigatorProps = {
-                            vendor: 'Google Inc.',
-                            vendorSub: '',
-                            productSub: '20030107',
-                            hardwareConcurrency: 8,
-                            deviceMemory: 8,
-                            webdriver: undefined
-                        };
-                        
-                        // Override navigator properties
-                        for (const [key, value] of Object.entries(navigatorProps)) {
-                            Object.defineProperty(navigator, key, {
-                                get: () => value,
-                                configurable: true,
-                                enumerable: true
-                            });
-                        }
-                        
-                        // Hide automation
-                        delete Object.getPrototypeOf(navigator).webdriver;
-                        
-                        // Additional cleanup to ensure webdriver is completely removed
-                        Object.defineProperty(navigator, 'webdriver', {
-                            get: () => undefined,
-                            configurable: true,
-                            enumerable: true
-                        });
-                    })();
-                """
-            })
-            
-            # Apply plugins and mimetypes
-            await page.send_command("Page.addScriptToEvaluateOnNewDocument", {
-                "source": """
-                    (() => {
-                        // Create plugin factory
-                        const createPlugin = (name, description, filename, mimeTypes) => {
-                            const plugin = { name, description, filename };
-                            Object.defineProperty(plugin, 'length', { value: mimeTypes.length });
-                            Object.defineProperty(plugin, 'item', { value: (index) => plugin[index] });
-                            Object.defineProperty(plugin, 'namedItem', { value: (name) => plugin[name] });
-                            
-                            mimeTypes.forEach((mt, i) => {
-                                const mimeType = {
-                                    type: mt.type,
-                                    suffixes: mt.suffixes,
-                                    description: mt.description,
-                                    enabledPlugin: plugin
-                                };
-                                plugin[i] = mimeType;
-                                plugin[mt.type] = mimeType;
-                            });
-                            
-                            return plugin;
-                        };
-                        
-                        // Create default plugins
-                        const defaultPlugins = [
-                            createPlugin(
-                                'Chrome PDF Plugin',
-                                'Portable Document Format',
-                                'internal-pdf-viewer',
-                                [{ type: 'application/x-google-chrome-pdf', suffixes: 'pdf', description: 'Portable Document Format' }]
-                            ),
-                            createPlugin(
-                                'Chrome PDF Viewer',
-                                '',
-                                'mhjfbmdgcfjbbpaeojofohoefgiehjai',
-                                [{ type: 'application/pdf', suffixes: 'pdf', description: '' }]
-                            ),
-                            createPlugin(
-                                'Native Client',
-                                '',
-                                'internal-nacl-plugin',
-                                [
-                                    { type: 'application/x-nacl', suffixes: '', description: 'Native Client Executable' },
-                                    { type: 'application/x-pnacl', suffixes: '', description: 'Portable Native Client Executable' }
-                                ]
-                            )
-                        ];
-                        
-                        // Create plugins array
-                        const plugins = {
-                            length: defaultPlugins.length,
-                            item: function(index) { return this[index]; },
-                            namedItem: function(name) { return this[name]; },
-                            refresh: function() {}
-                        };
-                        
-                        // Add plugins to array
-                        defaultPlugins.forEach((plugin, i) => {
-                            plugins[i] = plugin;
-                            plugins[plugin.name] = plugin;
-                        });
-                        
-                        // Override navigator.plugins and mimeTypes
-                        Object.defineProperty(navigator, 'plugins', {
-                            get: () => plugins,
-                            enumerable: true,
-                            configurable: true
-                        });
-                        
-                        // Create mimeTypes array
-                        const mimeTypes = {
-                            length: 0,
-                            item: function(index) { return this[index]; },
-                            namedItem: function(name) { return this[name]; }
-                        };
-                        
-                        Object.defineProperty(navigator, 'mimeTypes', {
-                            get: () => mimeTypes,
-                            enumerable: true,
-                            configurable: true
-                        });
-                    })();
-                """
-            })
-            
             # Apply user agent if specified
             if self.profile.user_agent:
                 await page.send_command("Network.setUserAgentOverride", {
@@ -404,6 +79,35 @@ class StealthBrowser(Browser):
                 "mobile": False
             })
             
+            logger.debug("Successfully created stealth page")
+            return page
+            
+        except Exception as e:
+            logger.error(f"Error setting up stealth page: {e}")
+            try:
+                await page.close()
+            except Exception as close_error:
+                logger.error(f"Error closing page after setup failure: {close_error}")
+            raise RuntimeError(f"Failed to setup stealth page: {e}")
+    
+    async def _apply_stealth_patches(self, page: Page) -> None:
+        """Apply all stealth patches to a page."""
+        try:
+            logger.debug("Applying stealth patches...")
+            
+            # Get ordered patches based on profile level
+            ordered_patches = get_ordered_patches(self.profile.level)
+            
+            # Apply each patch in order
+            for name, patch in ordered_patches:
+                try:
+                    logger.debug(f"Applying patch: {name}")
+                    await page.send_command("Page.addScriptToEvaluateOnNewDocument", {
+                        "source": patch["script"]
+                    })
+                except Exception as patch_error:
+                    logger.error(f"Error applying patch {name}: {patch_error}")
+            
             # Wait for patches to settle
             await asyncio.sleep(0.1)
             
@@ -426,6 +130,37 @@ class StealthBrowser(Browser):
             profile: New StealthProfile instance
         """
         self.profile = profile
+    
+    async def apply_advanced_stealth_patches(self, page: Page) -> None:
+        """
+        Apply additional advanced stealth patches to a page.
+        This can be used to enhance stealth capabilities for specific sites.
+        
+        Args:
+            page: The page to apply patches to
+        """
+        try:
+            logger.debug("Applying advanced stealth patches...")
+            
+            # Get all patches including experimental ones
+            ordered_patches = get_ordered_patches("maximum")
+            
+            # Apply experimental patches
+            for name, patch in ordered_patches:
+                if name.startswith("experimental_"):
+                    try:
+                        logger.debug(f"Applying experimental patch: {name}")
+                        await page.send_command("Page.addScriptToEvaluateOnNewDocument", {
+                            "source": patch["script"]
+                        })
+                    except Exception as patch_error:
+                        logger.error(f"Error applying experimental patch {name}: {patch_error}")
+            
+            logger.debug("Successfully applied advanced stealth patches")
+            
+        except Exception as e:
+            logger.error(f"Failed to apply advanced stealth patches: {e}")
+            raise RuntimeError(f"Failed to apply advanced stealth patches: {e}")
     
     async def _apply_page_patch(self, page: Page, patch: Dict[str, Any]) -> None:
         """Apply a patch to a specific page."""
