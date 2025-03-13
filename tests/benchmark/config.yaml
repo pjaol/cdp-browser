@@ -1,0 +1,100 @@
+# Cloudflare Bypass Benchmark Configuration
+
+# Test Sites Configuration
+test_sites:
+  javascript_challenge:
+    - url: "https://nowsecure.nl"
+      description: "Basic JavaScript challenge site"
+      timeout_ms: 30000
+      expected_status: 200
+      success_indicators:
+        - "content_type: text/html"
+        - "title: 'Now Secure'"
+    - url: "https://www.datanearme.co"
+      description: "Advanced JavaScript challenge site"
+      timeout_ms: 30000
+      expected_status: 200
+      success_indicators:
+        - "content_type: text/html"
+        - "!challenge-form"  # Should not contain challenge form
+
+  turnstile_challenge:
+    - url: "https://challenges.cloudflare.com/turnstile/example"
+      description: "Turnstile example challenge"
+      timeout_ms: 45000
+      expected_status: 200
+      success_indicators:
+        - "!turnstile-iframe"  # Should not contain Turnstile iframe
+        - "content_type: text/html"
+
+# Performance Thresholds
+thresholds:
+  regression:
+    success_rate_decrease: 5.0  # 5% decrease is considered regression
+    duration_increase: 20.0     # 20% increase is considered regression
+    memory_increase: 15.0       # 15% increase is considered regression
+  
+  success_criteria:
+    min_success_rate: 90.0      # Minimum acceptable success rate
+    max_duration_ms: 5000       # Maximum acceptable duration
+    max_memory_mb: 500         # Maximum acceptable memory usage
+    max_cpu_percent: 80        # Maximum acceptable CPU usage
+
+# Browser Profiles
+browser_profiles:
+  default:
+    level: "maximum"
+    user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+    window_size:
+      width: 1920
+      height: 1080
+    languages: ["en-US", "en"]
+  
+  mobile:
+    level: "maximum"
+    user_agent: "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
+    window_size:
+      width: 390
+      height: 844
+    languages: ["en-US", "en"]
+
+# Benchmark Settings
+settings:
+  results_dir: "benchmark_results"
+  parallel_tests: 1             # Number of parallel tests to run
+  retries: 3                    # Number of retries for failed tests
+  warmup_runs: 1               # Number of warmup runs before recording metrics
+  cooldown_seconds: 5          # Cooldown time between tests
+  save_screenshots: true       # Save screenshots of failures
+  save_html: true             # Save HTML content of failures
+  
+  logging:
+    level: "INFO"
+    format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    file: "benchmark.log"
+
+# Proxy Configuration (Optional)
+proxies:
+  - type: "http"
+    host: "localhost"
+    port: 8080
+    username: null
+    password: null
+    location: "US"
+  
+  - type: "socks5"
+    host: "localhost"
+    port: 9050
+    username: null
+    password: null
+    location: "EU"
+
+# CAPTCHA Solver Configuration (Optional)
+captcha_solvers:
+  2captcha:
+    api_key: ""
+    timeout: 120
+    
+  anti_captcha:
+    api_key: ""
+    timeout: 120 
