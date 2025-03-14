@@ -215,3 +215,7 @@ cython_debug/
 
 # Fingerprinting results and screenshots
 fingerprint_results/
+
+# Benchmark results
+benchmark_results/
+*.json
