@@ -8,6 +8,7 @@ import logging
 from typing import Any, Dict, List, Optional, Callable, Awaitable, TypeVar, Generic, TYPE_CHECKING, Tuple
 from websockets.client import WebSocketClientProtocol
 from collections import defaultdict
+import time
 
 from .exceptions import NavigationError, TimeoutError, PageError, BrowserError
 
@@ -125,17 +126,19 @@ class Page:
     Args:
         browser: The browser instance.
         target_id: The ID of the target (page/tab).
+        session_id: Optional session ID.
     """
-    def __init__(self, browser: "Browser", target_id: str) -> None:
+    def __init__(self, browser: "Browser", target_id: str, session_id: str = None) -> None:
         """Initialize a new page.
 
         Args:
             browser: The browser instance that created this page.
             target_id: The target ID of the page.
+            session_id: Optional session ID.
         """
         self.browser = browser
         self.target_id = target_id
-        self.session_id = None
+        self.session_id = session_id
         self._closed = False
         self._closing = False
         self._command_id = 0
@@ -171,6 +174,14 @@ class Page:
         
         # Set up default event handlers
         self._setup_default_handlers()
+
+        self._frame_id = target_id  # Initialize frame_id to target_id
+        self._inflight_requests = set()
+        self._load_promise = None
+        self._dom_content_promise = None
+
+        # Start message handling task
+        self._message_handler_task = asyncio.create_task(self._handle_messages())
 
     def _setup_default_handlers(self) -> None:
         """Set up default event handlers for page events."""
@@ -426,58 +437,58 @@ class Page:
         await self.close()
 
     async def initialize(self) -> None:
-        """Initialize the page by attaching to the target and enabling required domains."""
+        """Initialize the page.
+
+        This method should be called after creating a new page.
+        It sets up the necessary event handlers and enables required domains.
+
+        Raises:
+            PageError: If initialization fails.
+        """
         try:
-            # First attach to the target with flatten mode
-            result = await asyncio.wait_for(
-                self.browser.send_command("Target.attachToTarget", {
-                    "targetId": self.target_id,
-                    "flatten": True
-                }),
-                timeout=5.0
-            )
-            self.session_id = result.get("sessionId")
-            if not self.session_id:
-                raise PageError("Failed to get session ID from target attachment")
-            
-            logger.debug(f"Attached to target {self.target_id} with session {self.session_id}")
+            logger.debug(f"Initializing page with target ID: {self.target_id}")
 
-            # Enable target discovery
-            await asyncio.wait_for(
-                self.browser.send_command("Target.setDiscoverTargets", {"discover": True}),
-                timeout=5.0
-            )
-            logger.debug("Target discovery enabled")
+            # Attach to target if we have a target ID but no session ID
+            if self.target_id and not self.session_id:
+                logger.debug("Attaching to target...")
+                result = await self.browser.send_command(
+                    "Target.attachToTarget",
+                    {"targetId": self.target_id, "flatten": True}
+                )
+                if "sessionId" in result:
+                    self.session_id = result["sessionId"]
+                    logger.debug(f"Attached to target with session ID: {self.session_id}")
+                else:
+                    raise PageError("Failed to get session ID when attaching to target")
 
-            # Bind session to target
-            await asyncio.wait_for(
-                self.browser.send_command("Target.activateTarget", {
-                    "targetId": self.target_id
-                }),
-                timeout=5.0
-            )
-            logger.debug(f"Session bound to target {self.target_id}")
+            # Enable required domains in parallel with a shorter timeout
+            logger.debug("Enabling required domains...")
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        self.enable_domain("Page"),
+                        self.enable_domain("Runtime"),
+                        self.enable_domain("Network"),
+                        self.enable_domain("DOM")
+                    ),
+                    timeout=3.0
+                )
+                logger.debug("Required domains enabled")
+            except Exception as e:
+                raise PageError(f"Failed to enable required domains: {str(e)}")
 
-            # Now enable required domains
-            domains = ["Runtime", "Network", "Page"]
-            for domain in domains:
-                try:
-                    await asyncio.wait_for(
-                        self.enable_domain(domain),
-                        timeout=5.0
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to enable {domain} domain: {str(e)}")
+            # Initialize execution context with a shorter timeout
+            logger.debug("Initializing execution context...")
+            try:
+                await self.wait_for_execution_context(timeout=2.0)
+                logger.debug("Execution context initialized")
+            except Exception as e:
+                raise PageError(f"Failed to initialize execution context: {str(e)}")
 
-            logger.debug("Page initialization complete")
+            logger.debug("Page initialization completed successfully")
 
-        except asyncio.TimeoutError as e:
-            logger.error(f"Timeout during page initialization: {str(e)}")
-            await self.close()
-            raise PageError(f"Timeout during page initialization: {str(e)}")
         except Exception as e:
-            logger.error(f"Failed to initialize page: {str(e)}")
-            await self.close()
+            logger.error(f"Page initialization failed: {str(e)}")
             raise PageError(f"Failed to initialize page: {str(e)}")
 
     async def _handle_messages(self) -> None:
@@ -551,82 +562,430 @@ class Page:
     async def enable_domain(self, domain: str) -> None:
         """
         Enable a CDP domain.
-        
+
         Args:
             domain: The name of the CDP domain to enable.
-            
+
         Raises:
             PageError: If unable to enable the domain.
         """
         try:
             logger.debug(f"Attempting to enable {domain} domain...")
-            result = await self.send_command(f"{domain}.enable", {
-                "targetId": self.target_id
-            })
+            
+            # Ensure we have a session ID
+            if not self.session_id:
+                logger.debug("No session ID found, attempting to attach to target...")
+                result = await self.browser.send_command(
+                    "Target.attachToTarget",
+                    {"targetId": self.target_id, "flatten": True}
+                )
+                if "sessionId" in result:
+                    self.session_id = result["sessionId"]
+                    logger.debug(f"Successfully attached to target with session ID: {self.session_id}")
+                else:
+                    raise PageError("Failed to get session ID when attaching to target")
+            
+            # Send enable command with session ID
+            result = await self.browser.send_command(
+                f"{domain}.enable",
+                {"sessionId": self.session_id},
+                timeout=5.0  # Use a shorter timeout for enable commands
+            )
             logger.debug(f"Successfully enabled {domain} domain with result: {result}")
+            
         except Exception as e:
             logger.error(f"Failed to enable {domain} domain: {str(e)}")
             raise PageError(f"Failed to enable {domain} domain: {str(e)}")
 
-    async def navigate(self, url: str, wait_until: str = "load", timeout: Optional[float] = None) -> None:
+    async def wait_for_execution_context(self, timeout: float = 30.0) -> None:
+        """Wait for the main execution context to be ready.
+
+        Args:
+            timeout: Maximum time to wait in seconds.
+
+        Raises:
+            PageError: If the execution context is not ready within the timeout.
         """
-        Navigate to a URL and wait for the specified condition.
-        
+        try:
+            # Create an event to track execution context creation
+            context_ready = asyncio.Event()
+            self._execution_context_id = None
+
+            # Set up event handler for execution context creation
+            async def on_context_created(params):
+                context = params.get("context", {})
+                logger.debug(f"Received execution context: {context}")
+                if context.get("auxData", {}).get("isDefault"):
+                    self._execution_context_id = context.get("id")
+                    logger.debug(f"Setting execution context ID: {self._execution_context_id}")
+                    context_ready.set()
+
+            # Register event handler
+            self._events.on("Runtime.executionContextCreated", on_context_created)
+
+            try:
+                # Enable runtime if not already enabled
+                logger.debug("Enabling Runtime domain...")
+                await self.enable_domain("Runtime")
+
+                # Try to evaluate a simple expression to check for existing context
+                logger.debug("Checking for existing context...")
+                try:
+                    result = await self.send_command("Runtime.evaluate", {
+                        "expression": "1 + 1",
+                        "returnByValue": True
+                    })
+                    if result.get("result", {}).get("value") == 2:
+                        logger.debug("Found existing context")
+                        # If we can evaluate, we have a context
+                        # Try to get the context ID from the result
+                        if "contextId" in result:
+                            self._execution_context_id = result["contextId"]
+                            logger.debug(f"Got context ID from evaluation: {self._execution_context_id}")
+                        context_ready.set()
+                except Exception as e:
+                    logger.debug(f"No existing context found: {e}")
+
+                # If no existing context, wait for one to be created
+                if not context_ready.is_set():
+                    logger.debug("Waiting for context creation...")
+                    try:
+                        await asyncio.wait_for(context_ready.wait(), timeout)
+                    except asyncio.TimeoutError:
+                        logger.error(f"Timeout waiting for execution context after {timeout} seconds")
+                        # Try to force context creation
+                        logger.debug("Attempting to force context creation...")
+                        try:
+                            result = await self.send_command("Runtime.evaluate", {
+                                "expression": "void(0)",
+                                "awaitPromise": True
+                            })
+                            # Wait a bit for context to be created
+                            await asyncio.sleep(1)
+                            if not context_ready.is_set():
+                                # Try one more evaluation
+                                try:
+                                    result = await self.send_command("Runtime.evaluate", {
+                                        "expression": "1 + 1",
+                                        "returnByValue": True
+                                    })
+                                    if result.get("result", {}).get("value") == 2:
+                                        logger.debug("Found context after force")
+                                        # Try to get the context ID from the result
+                                        if "contextId" in result:
+                                            self._execution_context_id = result["contextId"]
+                                            logger.debug(f"Got context ID from forced evaluation: {self._execution_context_id}")
+                                        context_ready.set()
+                                except Exception as e:
+                                    logger.error(f"Failed to verify forced context: {e}")
+                                if not context_ready.is_set():
+                                    raise PageError(f"Execution context not ready after {timeout} seconds")
+                        except Exception as e:
+                            logger.error(f"Failed to force context creation: {e}")
+                            raise PageError(f"Execution context not ready after {timeout} seconds")
+
+                # If we still don't have a context ID, try to get it from the Runtime domain
+                if not self._execution_context_id:
+                    logger.debug("No context ID set, trying to get it from Runtime domain...")
+                    try:
+                        result = await self.send_command("Runtime.evaluate", {
+                            "expression": "1",
+                            "returnByValue": True,
+                            "generatePreview": False
+                        })
+                        if "contextId" in result:
+                            self._execution_context_id = result["contextId"]
+                            logger.debug(f"Got context ID from final evaluation: {self._execution_context_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to get context ID from Runtime domain: {e}")
+
+                # Verify context is usable by evaluating a simple expression
+                logger.debug("Verifying execution context...")
+                try:
+                    result = await self.send_command("Runtime.evaluate", {
+                        "expression": "1 + 1",
+                        "returnByValue": True
+                    })
+                    logger.debug(f"Context verification result: {result}")
+                    if "result" not in result or result.get("result", {}).get("value") != 2:
+                        raise PageError("Execution context verification failed")
+                    # One last attempt to get the context ID if we still don't have it
+                    if not self._execution_context_id and "contextId" in result:
+                        self._execution_context_id = result["contextId"]
+                        logger.debug(f"Got context ID from verification: {self._execution_context_id}")
+                except Exception as e:
+                    logger.error(f"Execution context verification failed: {str(e)}")
+                    raise PageError(f"Execution context verification failed: {str(e)}")
+
+                # If we still don't have a context ID, but we can evaluate, use a default
+                if not self._execution_context_id:
+                    logger.debug("No context ID found but context is working, using default ID")
+                    self._execution_context_id = 1
+
+            except asyncio.TimeoutError:
+                logger.error(f"Timeout waiting for execution context after {timeout} seconds")
+                raise PageError(f"Execution context not ready after {timeout} seconds")
+            except Exception as e:
+                logger.error(f"Error waiting for execution context: {str(e)}")
+                raise
+            finally:
+                # Clean up event handler
+                if "Runtime.executionContextCreated" in self._events._listeners:
+                    self._events._listeners["Runtime.executionContextCreated"].remove(on_context_created)
+
+        except Exception as e:
+            logger.error(f"Failed to wait for execution context: {str(e)}")
+            raise PageError(f"Failed to wait for execution context: {str(e)}")
+
+        logger.debug("Execution context ready")
+
+    async def evaluate(self, expression: str, return_by_value: bool = True) -> Any:
+        """Evaluate JavaScript expression in the page context.
+
+        Args:
+            expression: JavaScript expression to evaluate.
+            return_by_value: Whether to return the result by value.
+
+        Returns:
+            The result of the evaluation.
+
+        Raises:
+            PageError: If evaluation fails.
+        """
+        try:
+            # First, try to get the current execution context
+            if not self._execution_context_id:
+                logger.debug("No execution context ID set, attempting to get current context...")
+                try:
+                    # Try to get the current execution context
+                    result = await self.send_command("Runtime.evaluate", {
+                        "expression": "1",
+                        "returnByValue": True
+                    })
+                    if "contextId" in result:
+                        self._execution_context_id = result["contextId"]
+                        logger.debug(f"Got context ID from evaluation: {self._execution_context_id}")
+                except Exception as e:
+                    logger.debug(f"Failed to get context ID from evaluation: {e}")
+                    # If that fails, try to force a new context
+                    try:
+                        logger.debug("Attempting to force new context creation...")
+                        await self.send_command("Page.enable")
+                        await self.send_command("Runtime.enable")
+                        # Wait a bit for context to be created
+                        await asyncio.sleep(0.5)
+                        # Try evaluation again
+                        result = await self.send_command("Runtime.evaluate", {
+                            "expression": "1",
+                            "returnByValue": True
+                        })
+                        if "contextId" in result:
+                            self._execution_context_id = result["contextId"]
+                            logger.debug(f"Got context ID from forced creation: {self._execution_context_id}")
+                    except Exception as e2:
+                        logger.error(f"Failed to force context creation: {e2}")
+
+            # Now try to evaluate the expression
+            try:
+                # Wrap the expression in a try-catch block to capture JavaScript errors
+                wrapped_expression = f"""
+                    (() => {{
+                        try {{
+                            const result = {expression};
+                            return result;
+                        }} catch (e) {{
+                            return {{ __error__: e.message }};
+                        }}
+                    }})()
+                """
+
+                result = await self.send_command(
+                    "Runtime.evaluate",
+                    {
+                        "expression": wrapped_expression,
+                        "returnByValue": return_by_value,
+                        "awaitPromise": True,
+                        "userGesture": True,  # Allow certain operations that require user gesture
+                        "timeout": 5000,  # 5 second timeout for evaluation
+                        "generatePreview": True  # Get a preview of the result for better error messages
+                    }
+                )
+            except Exception as e:
+                if "Cannot find context with specified id" in str(e):
+                    logger.debug("Context not found, trying without context ID...")
+                    # Try without context ID
+                    result = await self.send_command(
+                        "Runtime.evaluate",
+                        {
+                            "expression": wrapped_expression,
+                            "returnByValue": return_by_value,
+                            "awaitPromise": True,
+                            "userGesture": True,
+                            "timeout": 5000,
+                            "generatePreview": True
+                        }
+                    )
+                else:
+                    raise
+
+            if "exceptionDetails" in result:
+                details = result["exceptionDetails"]
+                error_message = details.get('text', 'Unknown error')
+                if 'exception' in details:
+                    error_message += f": {details['exception'].get('description', '')}"
+                raise PageError(f"JavaScript evaluation failed: {error_message}")
+
+            if "result" not in result:
+                logger.error(f"No result in evaluation response: {result}")
+                return None
+
+            # Handle different result types
+            result_obj = result["result"]
+            result_type = result_obj.get("type")
+            result_value = result_obj.get("value")
+
+            if result_type == "undefined":
+                return None
+            elif result_type == "object" and result_obj.get("subtype") == "null":
+                return None
+            elif result_type == "object":
+                if return_by_value:
+                    if isinstance(result_value, dict) and "__error__" in result_value:
+                        raise PageError(f"JavaScript error: {result_value['__error__']}")
+                    return result_value if result_value is not None else {}
+                else:
+                    # For objects when not returning by value, return the remote object
+                    return result_obj
+            else:
+                return result_value
+
+        except Exception as e:
+            logger.error(f"Error evaluating JavaScript: {str(e)}")
+            raise PageError(f"Failed to evaluate JavaScript: {str(e)}")
+
+        finally:
+            logger.debug("JavaScript evaluation completed")
+
+    async def detach(self) -> None:
+        """Detach from the target.
+
+        Raises:
+            PageError: If detaching fails.
+        """
+        try:
+            if self.session_id:
+                logger.debug(f"Detaching from target with session ID: {self.session_id}")
+                await self.send_command("Target.detachFromTarget", {
+                    "sessionId": self.session_id
+                })
+            else:
+                logger.debug("No session ID available for detaching")
+        except Exception as e:
+            logger.error(f"Error detaching from target: {str(e)}")
+            raise PageError(f"Failed to detach from target: {str(e)}")
+
+    async def navigate(self, url: str, wait_until: str = "load", timeout: float = 30.0) -> None:
+        """Navigate to a URL and wait for the page to load.
+
         Args:
             url: The URL to navigate to.
-            wait_until: What to wait for - 'load', 'networkidle', 'domcontentloaded', or 'any'.
+            wait_until: When to consider navigation succeeded. One of: "load", "domcontentloaded", "networkidle".
             timeout: Maximum time to wait in seconds.
-            
+
         Raises:
-            NavigationError: If navigation fails or times out.
+            PageError: If navigation fails or times out.
         """
-        if self._closed:
-            raise PageError("Page is closed")
-            
-        timeout = timeout or self._navigation_timeout
-        
-        async with self._navigation_lock:
+        try:
+            # Create events for tracking navigation state
+            load_event = asyncio.Event()
+            dom_content_event = asyncio.Event()
+            network_idle_event = asyncio.Event()
+            navigation_complete = False
+
+            # Set up event handlers
+            async def on_frame_navigated(params):
+                frame = params.get("frame", {})
+                if frame.get("id") == self._frame_id:
+                    logger.debug("Frame navigated")
+                    nonlocal navigation_complete
+                    navigation_complete = True
+
+            async def on_load_event_fired(_):
+                logger.debug("Load event fired")
+                load_event.set()
+
+            async def on_dom_content_event_fired(_):
+                logger.debug("DOMContentLoaded event fired")
+                dom_content_event.set()
+
+            async def on_network_almost_idle(_):
+                if navigation_complete:
+                    logger.debug("Network almost idle")
+                    network_idle_event.set()
+
+            # Register event handlers
+            self._events.on("Page.frameNavigated", on_frame_navigated)
+            self._events.on("Page.loadEventFired", on_load_event_fired)
+            self._events.on("Page.domContentEventFired", on_dom_content_event_fired)
+            self._events.on("Network.loadingFinished", on_network_almost_idle)
+
             try:
-                # Reset navigation state
-                for event in self._navigation_events.values():
-                    event.clear()
-                self._navigation_state.update({
-                    "frame_stopped_loading": False,
-                    "load_complete": False,
-                    "navigation_complete": False,
-                    "load_event_fired": False,
-                    "dom_content_event_fired": False,
-                    "network_idle": False
-                })
-                self._pending_network_requests.clear()
-                self._navigation_request_id = None
-                self._navigation_start_time = asyncio.get_event_loop().time()
-                
-                # Enable required domains
-                await self.enable_domain("Page")
-                await self.enable_domain("Network")
-                
+                # Enable required domains in parallel with a shorter timeout
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        self.enable_domain("Page"),
+                        self.enable_domain("Network"),
+                        self.enable_domain("Runtime")
+                    ),
+                    timeout=2.0
+                )
+
                 # Start navigation
-                logger.debug(f"Starting navigation to {url}")
-                result = await self.send_command("Page.navigate", {"url": url})
-                if "errorText" in result:
-                    raise NavigationError(f"Navigation failed: {result['errorText']}")
-                
-                # Wait for the specified condition using our improved wait_for_navigation method
+                logger.debug(f"Navigating to {url}")
+                await self.send_command("Page.navigate", {"url": url})
+
+                # Create tasks for different navigation events with shorter timeouts
+                tasks = []
+                event_timeout = min(timeout * 0.3, 3.0)  # Use shorter timeout for individual events
+
+                if wait_until in ["load", "networkidle"]:
+                    tasks.append(asyncio.create_task(asyncio.wait_for(load_event.wait(), event_timeout)))
+                if wait_until in ["domcontentloaded", "networkidle"]:
+                    tasks.append(asyncio.create_task(asyncio.wait_for(dom_content_event.wait(), event_timeout)))
+                if wait_until == "networkidle":
+                    tasks.append(asyncio.create_task(asyncio.wait_for(network_idle_event.wait(), event_timeout)))
+
+                # Wait for all required events
                 try:
-                    logger.debug(f"Waiting for navigation with strategy: {wait_until}")
-                    await self.wait_for_navigation(timeout=timeout, wait_until=wait_until)
-                    logger.debug("Navigation completed successfully")
-                    
-                except TimeoutError as e:
-                    raise NavigationError(f"Navigation timeout: {str(e)}")
-                    
-                # Update current URL
-                self.url = await self.get_current_url()
-                
-            except Exception as e:
-                logger.error(f"Navigation failed: {e}")
-                raise NavigationError(f"Navigation failed: {str(e)}")
+                    await asyncio.gather(*tasks)
+                    logger.debug(f"Navigation completed with wait_until: {wait_until}")
+                except asyncio.TimeoutError:
+                    # If we hit the event timeout but navigation is complete, consider it successful
+                    if navigation_complete:
+                        logger.debug("Navigation complete but some events timed out")
+                    else:
+                        raise PageError(f"Navigation timeout of {timeout} seconds exceeded")
+
+                # Ensure execution context is ready with a shorter timeout
+                await self.wait_for_execution_context(timeout=2.0)
+
+            finally:
+                # Clean up event handlers
+                if "Page.frameNavigated" in self._events._listeners:
+                    self._events._listeners["Page.frameNavigated"].remove(on_frame_navigated)
+                if "Page.loadEventFired" in self._events._listeners:
+                    self._events._listeners["Page.loadEventFired"].remove(on_load_event_fired)
+                if "Page.domContentEventFired" in self._events._listeners:
+                    self._events._listeners["Page.domContentEventFired"].remove(on_dom_content_event_fired)
+                if "Network.loadingFinished" in self._events._listeners:
+                    self._events._listeners["Network.loadingFinished"].remove(on_network_almost_idle)
+
+        except Exception as e:
+            logger.error(f"Navigation failed: {str(e)}")
+            raise PageError(f"Navigation failed: {str(e)}")
+
+        finally:
+            logger.debug("Navigation attempt completed")
 
     async def get_current_url(self) -> str:
         """Get the current URL of the page."""
@@ -644,14 +1003,90 @@ class Page:
             return self.url
 
     async def get_content(self) -> str:
-        """
-        Get the page's HTML content.
-        
+        """Get the page content.
+
         Returns:
-            The HTML content of the page.
+            The page content as a string.
+
+        Raises:
+            PageError: If getting the content fails.
         """
-        result = await self.evaluate("() => document.documentElement.outerHTML")
-        return result if isinstance(result, str) else str(result)
+        try:
+            # First ensure we have a valid execution context
+            await self.wait_for_execution_context()
+
+            # Try different methods to get the content
+            for expression in [
+                "document.documentElement.outerHTML",
+                "document.documentElement.innerHTML",
+                "document.body.outerHTML",
+                "document.body.innerHTML"
+            ]:
+                try:
+                    logger.debug(f"Attempting to get content using: {expression}")
+                    content = await self.evaluate(expression)
+                    if content and isinstance(content, str) and len(content.strip()) > 0:
+                        logger.debug(f"Successfully got content using: {expression}")
+                        return content
+                    logger.debug(f"Empty content returned from: {expression}")
+                except Exception as e:
+                    logger.debug(f"Failed to get content using {expression}: {e}")
+                    continue
+
+            # If all methods failed, try a more robust approach
+            logger.debug("Trying robust content extraction...")
+            try:
+                # Enable DOM domain if not already enabled
+                await self.enable_domain("DOM")
+                
+                # Get the document
+                root = await self.send_command("DOM.getDocument", {
+                    "depth": -1,
+                    "pierce": True
+                })
+                
+                if root and "root" in root:
+                    # Get outer HTML of root node
+                    result = await self.send_command("DOM.getOuterHTML", {
+                        "nodeId": root["root"]["nodeId"]
+                    })
+                    if result and "outerHTML" in result:
+                        content = result["outerHTML"]
+                        if content and len(content.strip()) > 0:
+                            logger.debug("Successfully got content using DOM.getOuterHTML")
+                            return content
+                        logger.debug("Empty content returned from DOM.getOuterHTML")
+            except Exception as e:
+                logger.debug(f"Failed to get content using DOM methods: {e}")
+
+            # If we still don't have content, try one last method
+            try:
+                logger.debug("Trying final content extraction method...")
+                script = """
+                    (() => {
+                        const html = document.documentElement.outerHTML;
+                        if (html) return html;
+                        const body = document.body.outerHTML;
+                        if (body) return body;
+                        return document.documentElement.textContent;
+                    })()
+                """
+                content = await self.evaluate(script)
+                if content and isinstance(content, str) and len(content.strip()) > 0:
+                    logger.debug("Successfully got content using final method")
+                    return content
+                logger.debug("Empty content returned from final method")
+            except Exception as e:
+                logger.debug(f"Failed to get content using final method: {e}")
+
+            raise PageError("Failed to get page content: all methods returned empty content")
+
+        except Exception as e:
+            logger.error(f"Error getting page content: {str(e)}")
+            raise PageError(f"Failed to get page content: {str(e)}")
+
+        finally:
+            logger.debug("Content extraction attempt completed")
 
     async def get_title(self) -> str:
         """
@@ -757,85 +1192,6 @@ class Page:
                 break
             
             await asyncio.sleep(0.1)
-
-    async def evaluate(self, expression: str, await_promise: bool = True) -> Any:
-        """
-        Evaluate JavaScript code in the context of the page.
-        
-        Args:
-            expression: JavaScript expression or function to evaluate
-            await_promise: Whether to wait for any promise to resolve
-            
-        Returns:
-            The result of the expression
-        """
-        try:
-            # First try simple evaluation with Runtime.evaluate
-            raw_result = await self.send_command(
-                "Runtime.evaluate",
-                {
-                    "expression": expression,
-                    "returnByValue": True,
-                    "awaitPromise": await_promise
-                }
-            )
-            self.logger.debug(f"Raw evaluate result: {raw_result.get('result', {})}")
-
-            # If we got a function, execute it in the current context
-            if raw_result.get("result", {}).get("type") == "function":
-                if not self._execution_context_id:
-                    # If we don't have an execution context ID, try reloading the page
-                    self.logger.warning("No execution context found, attempting to reload page")
-                    await self.send_command("Page.reload")
-                    await asyncio.sleep(3)  # Wait for page to reload
-                    
-                    # Try evaluating again after reload
-                    return await self.evaluate(expression, await_promise)
-
-                raw_result = await self.send_command(
-                    "Runtime.callFunctionOn",
-                    {
-                        "functionDeclaration": expression,
-                        "executionContextId": self._execution_context_id,
-                        "returnByValue": True,
-                        "awaitPromise": await_promise
-                    }
-                )
-
-            result = raw_result.get("result", {})
-
-            # Handle primitive values
-            if result.get("type") in ["string", "number", "boolean", "undefined"]:
-                self.logger.debug(f"Found primitive value: {result.get('value')}")
-                return result.get("value")
-
-            # Handle object references
-            if "objectId" in result:
-                props = await self.send_command(
-                    "Runtime.getProperties",
-                    {"objectId": result["objectId"], "ownProperties": True}
-                )
-                
-                obj = {}
-                for prop in props.get("result", []):
-                    if prop.get("enumerable") and "value" in prop:
-                        obj[prop["name"]] = prop["value"].get("value")
-                return obj
-
-            return result.get("value")
-
-        except Exception as e:
-            self.logger.error(f"Error evaluating JavaScript: {e}")
-            # If we got an execution context error, try refreshing the page and evaluating again
-            if "execution context" in str(e).lower() and "Cannot find context" in str(e):
-                self.logger.warning("Execution context error, trying to reload page and retry evaluation")
-                try:
-                    await self.send_command("Page.reload")
-                    await asyncio.sleep(3)  # Wait for page to reload
-                    return await self.evaluate(expression, await_promise)
-                except Exception as retry_error:
-                    self.logger.error(f"Retry evaluation failed: {retry_error}")
-            raise
 
     async def type(self, selector: str, text: str) -> None:
         """
@@ -1025,3 +1381,177 @@ class Page:
                         self._navigation_events["load"].set()
         else:
             logger.debug(f"Network not idle, {len(self._pending_network_requests)} pending requests")
+
+    async def wait_for_network_idle(self, timeout: float = 30.0, max_inflight_requests: int = 0) -> None:
+        """Wait for network to be idle.
+
+        Args:
+            timeout: Maximum time to wait in seconds.
+            max_inflight_requests: Maximum number of inflight requests to consider network idle.
+
+        Raises:
+            PageError: If network does not become idle within timeout.
+        """
+        try:
+            # Enable Network domain if not already enabled
+            await self.enable_domain("Network")
+
+            idle_event = asyncio.Event()
+            check_idle_handle = None
+            last_request_time = time.time()
+
+            def check_network_idle():
+                nonlocal check_idle_handle
+                if len(self._inflight_requests) <= max_inflight_requests:
+                    if time.time() - last_request_time >= 0.5:  # Network considered idle after 0.5s of no activity
+                        idle_event.set()
+                        return
+                if check_idle_handle:
+                    check_idle_handle.cancel()
+                check_idle_handle = asyncio.get_event_loop().call_later(0.1, check_network_idle)
+
+            # Set up request tracking
+            async def on_request_sent(params):
+                nonlocal last_request_time
+                request_id = params.get("requestId")
+                if request_id:
+                    self._inflight_requests.add(request_id)
+                    last_request_time = time.time()
+                    check_network_idle()
+
+            async def on_request_finished(params):
+                nonlocal last_request_time
+                request_id = params.get("requestId")
+                if request_id and request_id in self._inflight_requests:
+                    self._inflight_requests.remove(request_id)
+                    last_request_time = time.time()
+                    check_network_idle()
+
+            # Register event handlers
+            self._events.on("Network.requestWillBeSent", on_request_sent)
+            self._events.on("Network.loadingFinished", on_request_finished)
+            self._events.on("Network.loadingFailed", on_request_finished)
+
+            try:
+                # Start checking network state
+                check_network_idle()
+
+                # Wait for network to become idle
+                try:
+                    await asyncio.wait_for(idle_event.wait(), timeout)
+                    logger.debug("Network is idle")
+                except asyncio.TimeoutError:
+                    raise PageError(f"Network did not become idle within {timeout} seconds")
+
+            finally:
+                # Clean up event handlers and idle check
+                if check_idle_handle:
+                    check_idle_handle.cancel()
+                if "Network.requestWillBeSent" in self._events._listeners:
+                    self._events._listeners["Network.requestWillBeSent"].remove(on_request_sent)
+                if "Network.loadingFinished" in self._events._listeners:
+                    self._events._listeners["Network.loadingFinished"].remove(on_request_finished)
+                if "Network.loadingFailed" in self._events._listeners:
+                    self._events._listeners["Network.loadingFailed"].remove(on_request_finished)
+
+        except Exception as e:
+            logger.error(f"Error waiting for network idle: {str(e)}")
+            raise PageError(f"Failed to wait for network idle: {str(e)}")
+
+        finally:
+            logger.debug("Network idle check completed")
+
+    async def wait_for_load(self, timeout: float = 30.0) -> None:
+        """Wait for the page load event.
+
+        Args:
+            timeout: Maximum time to wait in seconds.
+
+        Raises:
+            PageError: If the load event is not fired within the timeout.
+        """
+        try:
+            # Create an event to track load completion
+            load_event = asyncio.Event()
+
+            # Set up event handler
+            async def on_load(_):
+                load_event.set()
+
+            # Register event handler
+            self._events.on("Page.loadEventFired", on_load)
+
+            try:
+                # Wait for load event
+                await asyncio.wait_for(load_event.wait(), timeout)
+            except asyncio.TimeoutError:
+                raise PageError(f"Page load timeout after {timeout} seconds")
+            finally:
+                # Clean up event handler
+                if "Page.loadEventFired" in self._events._listeners:
+                    self._events._listeners["Page.loadEventFired"].remove(on_load)
+
+        except Exception as e:
+            raise PageError(f"Failed to wait for page load: {str(e)}")
+
+    async def wait_for_dom_content(self, timeout: float = 30.0) -> None:
+        """Wait for the DOMContentLoaded event.
+
+        Args:
+            timeout: Maximum time to wait in seconds.
+
+        Raises:
+            PageError: If the DOMContentLoaded event is not fired within the timeout.
+        """
+        try:
+            # Create an event to track DOMContentLoaded completion
+            dom_event = asyncio.Event()
+
+            # Set up event handler
+            async def on_dom_content(_):
+                dom_event.set()
+
+            # Register event handler
+            self._events.on("Page.domContentEventFired", on_dom_content)
+
+            try:
+                # Wait for DOMContentLoaded event
+                await asyncio.wait_for(dom_event.wait(), timeout)
+            except asyncio.TimeoutError:
+                raise PageError(f"DOMContentLoaded timeout after {timeout} seconds")
+            finally:
+                # Clean up event handler
+                if "Page.domContentEventFired" in self._events._listeners:
+                    self._events._listeners["Page.domContentEventFired"].remove(on_dom_content)
+
+        except Exception as e:
+            raise PageError(f"Failed to wait for DOMContentLoaded: {str(e)}")
+
+    async def get_cookies(self) -> List[Dict]:
+        """Get all cookies for the current page.
+
+        Returns:
+            A list of cookie objects.
+
+        Raises:
+            PageError: If getting cookies fails.
+        """
+        try:
+            # Enable Network domain if not already enabled
+            await self.enable_domain("Network")
+
+            # Get all cookies
+            result = await self.send_command("Network.getAllCookies")
+            if "cookies" in result:
+                logger.debug(f"Retrieved {len(result['cookies'])} cookies")
+                return result["cookies"]
+            
+            logger.debug("No cookies found in response")
+            return []
+
+        except Exception as e:
+            logger.error(f"Error getting cookies: {str(e)}")
+            raise PageError(f"Failed to get cookies: {str(e)}")
+
+        finally:
+            logger.debug("Cookie retrieval completed")

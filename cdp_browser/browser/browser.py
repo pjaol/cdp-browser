@@ -35,7 +35,7 @@ class Browser:
         self.command_id = 0
         self.max_retries = max_retries
         self._connected = False
-        self._pages: List[Page] = []
+        self._pages: Dict[str, Page] = {}
         self._ws_lock = asyncio.Lock()
         self._events = EventEmitter()
         self._command_futures: Dict[int, asyncio.Future] = {}
@@ -124,7 +124,7 @@ class Browser:
             
             # Close all pages with timeout
             close_tasks = []
-            for page in self._pages[:]:
+            for page in list(self._pages.values()):
                 task = asyncio.create_task(self._close_page_with_timeout(page))
                 close_tasks.append(task)
             
@@ -165,8 +165,8 @@ class Browser:
         except Exception as e:
             logger.warning(f"Error closing page: {e}")
         finally:
-            if page in self._pages:
-                self._pages.remove(page)
+            if page.target_id in self._pages:
+                del self._pages[page.target_id]
 
     async def _handle_websocket(self):
         """Background task to handle incoming WebSocket messages."""
@@ -205,7 +205,7 @@ class Browser:
                         # Route events to appropriate page
                         session_id = data.get("sessionId")
                         if session_id:
-                            for page in self._pages:
+                            for page in self._pages.values():
                                 if page.session_id == session_id:
                                     await page._handle_event(data)
                                     break
@@ -215,7 +215,7 @@ class Browser:
                             target_info = params.get("targetInfo", {})
                             target_id = target_info.get("targetId")
                             if target_id:
-                                for page in self._pages:
+                                for page in self._pages.values():
                                     if page.target_id == target_id:
                                         await page._handle_event(data)
                                         break
@@ -249,62 +249,101 @@ class Browser:
             self._command_futures.clear()
 
     async def send_command(self, method: str, params: Optional[Dict] = None, timeout: Optional[float] = None) -> Dict:
-        """Send a command to the browser and wait for the response with timeout."""
+        """Send a command to the browser and wait for the response with timeout.
+
+        Args:
+            method: The method to call.
+            params: Optional parameters for the method.
+            timeout: Optional timeout in seconds.
+
+        Returns:
+            The result of the command.
+
+        Raises:
+            BrowserError: If the command fails or times out.
+        """
         if params is None:
             params = {}
 
-        command_id = self._next_command_id()
-        future = asyncio.Future()
-        self._command_futures[command_id] = future
+        max_retries = 3
+        retry_count = 0
+        last_error = None
 
-        try:
-            # For flat protocol, if we have a sessionId, include it in the outer message
-            session_id = params.pop("sessionId", None)
-            message = {
-                "id": command_id,
-                "method": method,
-                "params": params
-            }
-
-            if session_id:
-                message["sessionId"] = session_id
-
-            await self.websocket.send(json.dumps(message))
-
+        while retry_count < max_retries:
             try:
-                response = await asyncio.wait_for(
-                    future,
-                    timeout=timeout or self._default_timeout
-                )
-                if "error" in response:
-                    error = response["error"]
-                    raise BrowserError(f"Command {method} failed: {error['message']}")
-                return response.get("result", {})
-            except asyncio.TimeoutError:
-                raise BrowserError(f"Command {method} timed out after {timeout or self._default_timeout} seconds")
+                command_id = self._next_command_id()
+                future = asyncio.Future()
+                self._command_futures[command_id] = future
 
-        except Exception as e:
-            raise BrowserError(f"Failed to send command {method}: {str(e)}")
-        finally:
-            self._command_futures.pop(command_id, None)
+                # For flat protocol, if we have a sessionId, include it in the outer message
+                session_id = params.pop("sessionId", None)
+                message = {
+                    "id": command_id,
+                    "method": method,
+                    "params": params
+                }
+
+                if session_id:
+                    message["sessionId"] = session_id
+
+                await self.websocket.send(json.dumps(message))
+
+                try:
+                    response = await asyncio.wait_for(
+                        future,
+                        timeout=timeout or self._default_timeout
+                    )
+                    if "error" in response:
+                        error = response["error"]
+                        raise BrowserError(f"Command {method} failed: {error['message']}")
+                    return response.get("result", {})
+                except asyncio.TimeoutError:
+                    logger.warning(f"Command {method} timed out after {timeout or self._default_timeout} seconds (attempt {retry_count + 1}/{max_retries})")
+                    last_error = f"Command {method} timed out after {timeout or self._default_timeout} seconds"
+                    retry_count += 1
+                    await asyncio.sleep(0.5)  # Wait before retrying
+                    continue
+
+            except Exception as e:
+                last_error = str(e)
+                retry_count += 1
+                if retry_count < max_retries:
+                    logger.warning(f"Failed to send command {method} (attempt {retry_count}/{max_retries}): {str(e)}")
+                    await asyncio.sleep(0.5)  # Wait before retrying
+                    continue
+                break
+
+            finally:
+                # Clean up the future
+                if command_id in self._command_futures:
+                    del self._command_futures[command_id]
+
+        raise BrowserError(f"Failed to send command {method} after {max_retries} attempts: {last_error}")
 
     async def create_page(self) -> Page:
-        """Create a new page (target) and return it."""
-        logger.debug("Creating new page")
-        # Create a new target (page)
-        result = await self.send_command(
-            "Target.createTarget",
-            {"url": "about:blank"}
-        )
+        """Create a new page.
+
+        Returns:
+            A new page instance.
+        """
+        # Create a new target
+        result = await self.send_command("Target.createTarget", {"url": "about:blank"})
         target_id = result["targetId"]
-        logger.debug(f"Created target with ID: {target_id}")
-        
-        # Create and initialize the page
-        page = Page(self, target_id)
-        self._pages.append(page)  # Add to pages list before initialization
+
+        # Attach to the target to get a session ID
+        result = await self.send_command("Target.attachToTarget", {
+            "targetId": target_id,
+            "flatten": True
+        })
+        session_id = result["sessionId"]
+
+        # Create and store the page
+        page = Page(self, target_id, session_id)
+        self._pages[target_id] = page  # Store in dictionary using target_id as key
+
+        # Initialize the page
         await page.initialize()
-        logger.debug(f"Page initialized with target ID: {target_id}")
-        
+
         return page
 
     async def _handle_event(self, event: Dict[str, Any]) -> None:
@@ -324,21 +363,19 @@ class Browser:
             session_id = params.get("sessionId")
             if target_id and session_id:
                 logger.debug(f"Target attached: {target_id} with session {session_id}")
-                for page in self._pages:
-                    if page.target_id == target_id:
-                        await page._handle_event(event)
+                if target_id in self._pages:
+                    await self._pages[target_id]._handle_event(event)
 
         elif method == "Target.detachedFromTarget":
             target_id = params.get("targetId")
             if target_id:
                 logger.debug(f"Target detached: {target_id}")
-                for page in self._pages:
-                    if page.target_id == target_id:
-                        await page._handle_event(event)
+                if target_id in self._pages:
+                    await self._pages[target_id]._handle_event(event)
 
         elif session_id:
             # If the event has a session ID, it belongs to a page
-            for page in self._pages:
+            for page in self._pages.values():
                 if page.session_id == session_id:
                     await page._handle_event(event)
                     break
@@ -360,7 +397,7 @@ class Browser:
             return
 
         logger.debug(f"Closing {len(self._pages)} pages")
-        for page in self._pages:
+        for page in list(self._pages.values()):
             try:
                 await page.close()
             except Exception as e:

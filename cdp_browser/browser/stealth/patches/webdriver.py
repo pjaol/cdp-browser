@@ -63,17 +63,17 @@ register_patch(
             // Ignore errors
         }
         
-        // Layer 2: Define property on navigator that returns false
+        // Layer 2: Define property on navigator that returns undefined
         try {
             Object.defineProperty(navigator, 'webdriver', {
-                get: makeNativeFunction(function() { return false; }, ''),
+                get: makeNativeFunction(function() { return undefined; }, ''),
                 configurable: true,
                 enumerable: true
             });
         } catch (e) {
             // Fallback if defineProperty fails
             try {
-                navigator.webdriver = false;
+                navigator.webdriver = undefined;
             } catch (e2) {
                 // Ignore errors
             }
@@ -100,7 +100,7 @@ register_patch(
                 const navigatorProxy = new Proxy(navigator, {
                     get: function(target, prop) {
                         if (prop === 'webdriver') {
-                            return false;
+                            return undefined;
                         }
                         return target[prop];
                     },
@@ -120,7 +120,7 @@ register_patch(
                     Object.getOwnPropertyDescriptors = function(obj) {
                         const descriptors = originalGetOwnPropertyDescriptors.apply(this, arguments);
                         if (obj === navigator && descriptors.webdriver) {
-                            descriptors.webdriver.value = false;
+                            delete descriptors.webdriver;
                         }
                         return descriptors;
                     };
@@ -137,12 +137,7 @@ register_patch(
             const originalGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
             Object.getOwnPropertyDescriptor = function(obj, prop) {
                 if (obj === navigator && prop === 'webdriver') {
-                    return {
-                        value: false,
-                        configurable: true,
-                        enumerable: false,
-                        writable: true
-                    };
+                    return undefined;
                 }
                 return originalGetOwnPropertyDescriptor.apply(this, arguments);
             };
@@ -229,8 +224,8 @@ register_patch(
                 }
             }
             
-            // Add false webdriver property
-            navigatorProps.webdriver = false;
+            // Add undefined webdriver property
+            navigatorProps.webdriver = undefined;
             
             // Try to redefine navigator (may not work in all browsers)
             Object.defineProperty(window, 'navigator', {

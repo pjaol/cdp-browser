@@ -65,15 +65,9 @@ register_patch(
     (() => {
         // Helper to make functions look native
         const makeNativeFunction = (fn, name = '') => {
-            const originalFunction = window.Function;
-            const wrapped = originalFunction('return ' + fn)();
-            Object.defineProperty(wrapped, 'name', { value: name });
-            Object.defineProperty(wrapped, 'toString', {
-                value: function() { return `function ${name || fn.name || ''}() { [native code] }` },
-                configurable: true,
-                writable: true
-            });
-            return wrapped;
+            return function() {
+                return fn.apply(this, arguments);
+            };
         };
         
         // Store important navigator properties
@@ -83,7 +77,6 @@ register_patch(
             platform: navigator.platform,
             vendor: navigator.vendor,
             language: navigator.language,
-            languages: JSON.stringify(navigator.languages),
             deviceMemory: navigator.deviceMemory,
             hardwareConcurrency: navigator.hardwareConcurrency,
             appName: navigator.appName,
@@ -91,39 +84,19 @@ register_patch(
             cookieEnabled: navigator.cookieEnabled,
             doNotTrack: navigator.doNotTrack,
             maxTouchPoints: navigator.maxTouchPoints,
-            webdriver: false
+            webdriver: undefined
         };
         
         // Create a script to inject into workers
         const workerPatchScript = `
             // Override worker navigator properties
-            ${Object.entries(navigatorProps).map(([key, value]) => {
-                if (typeof value === 'string' && value.startsWith('[') && value.endsWith(']')) {
-                    // Handle arrays like languages
-                    return `
-                        Object.defineProperty(navigator, '${key}', {
-                            get: function() { return JSON.parse('${value}'); },
-                            configurable: true
-                        });
-                    `;
-                } else if (typeof value === 'string') {
-                    // Handle string values
-                    return `
-                        Object.defineProperty(navigator, '${key}', {
-                            get: function() { return "${value.replace(/"/g, '\\"')}"; },
-                            configurable: true
-                        });
-                    `;
-                } else {
-                    // Handle other values
-                    return `
-                        Object.defineProperty(navigator, '${key}', {
-                            get: function() { return ${value}; },
-                            configurable: true
-                        });
-                    `;
-                }
-            }).join('\n')}
+            const props = ${JSON.stringify(navigatorProps)};
+            Object.keys(props).forEach(key => {
+                Object.defineProperty(navigator, key, {
+                    get: function() { return props[key]; },
+                    configurable: true
+                });
+            });
             
             // Override worker detection methods
             self.isSecureContext = window.isSecureContext;
@@ -147,12 +120,14 @@ register_patch(
             const blob = new Blob([workerPatchScript], { type: 'application/javascript' });
             const blobUrl = URL.createObjectURL(blob);
             
-            // Prepend our script to the worker
-            const originalScripts = Array.isArray(url) ? url : [url];
-            const patchedScripts = [blobUrl, ...originalScripts];
-            
             // Create the worker with patched scripts
-            const worker = new originalWorker(patchedScripts, options);
+            const worker = new originalWorker(url, options);
+            
+            // Apply patches
+            worker.postMessage({
+                type: '__stealth_worker_init__',
+                blobUrl: blobUrl
+            });
             
             // Return the patched worker
             return worker;
@@ -184,12 +159,14 @@ register_patch(
                 const blob = new Blob([workerPatchScript], { type: 'application/javascript' });
                 const blobUrl = URL.createObjectURL(blob);
                 
-                // Prepend our script to the worker
-                const originalScripts = Array.isArray(url) ? url : [url];
-                const patchedScripts = [blobUrl, ...originalScripts];
-                
                 // Create the worker with patched scripts
-                const worker = new originalSharedWorker(patchedScripts, options);
+                const worker = new originalSharedWorker(url, options);
+                
+                // Apply patches
+                worker.port.postMessage({
+                    type: '__stealth_worker_init__',
+                    blobUrl: blobUrl
+                });
                 
                 // Return the patched worker
                 return worker;
@@ -213,31 +190,20 @@ register_patch(
             }
         }
         
-        // Monitor for dynamic worker creation
-        // This catches workers created via Blob URLs
+        // Clean up URL.createObjectURL to prevent memory leaks
         const originalCreateObjectURL = URL.createObjectURL;
-        URL.createObjectURL = function(blob) {
-            if (blob instanceof Blob && blob.type === 'application/javascript') {
-                // Try to detect if this is for a worker
-                try {
-                    // Convert blob to text to check content
-                    const reader = new FileReader();
-                    reader.readAsText(blob);
-                    reader.onload = function() {
-                        const content = reader.result;
-                        // If it looks like worker code, create a new blob with our patches
-                        if (content.includes('self.') || content.includes('addEventListener') || 
-                            content.includes('postMessage')) {
-                            const newBlob = new Blob([workerPatchScript, content], { type: 'application/javascript' });
-                            // Replace the original blob with our patched version
-                            blob = newBlob;
-                        }
-                    };
-                } catch (e) {
-                    // Ignore errors
-                }
+        URL.createObjectURL = function() {
+            const url = originalCreateObjectURL.apply(this, arguments);
+            if (arguments[0] instanceof Blob && arguments[0].type === 'application/javascript') {
+                setTimeout(() => {
+                    try {
+                        URL.revokeObjectURL(url);
+                    } catch (e) {
+                        // Ignore revocation errors
+                    }
+                }, 1000);
             }
-            return originalCreateObjectURL.apply(this, arguments);
+            return url;
         };
     })();
     """
