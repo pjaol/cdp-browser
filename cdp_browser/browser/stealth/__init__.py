@@ -33,16 +33,34 @@ class StealthBrowser(Browser):
         page = await super().create_page()
         
         try:
-            # Enable required domains one at a time
-            logger.debug("Enabling required domains...")
-            await page.send_command("Network.enable")
-            await page.send_command("Page.enable")
-            await page.send_command("Runtime.enable")
+            # Wait for CDP connection to be fully established
+            logger.debug("Waiting for CDP connection...")
+            await asyncio.sleep(1)
             
-            # Navigate to blank page to establish a clean execution context
-            logger.debug("Navigating to blank page to establish execution context...")
-            await page.navigate("about:blank")
-            await asyncio.sleep(1)  # Give time for context to be created
+            # Enable required domains with retries
+            domains = ["Network", "Page", "Runtime"]
+            for domain in domains:
+                retries = 0
+                while retries < 3:
+                    try:
+                        logger.debug(f"Enabling {domain} domain (attempt {retries + 1})...")
+                        await page.send_command(f"{domain}.enable")
+                        logger.debug(f"Successfully enabled {domain} domain")
+                        break
+                    except Exception as e:
+                        retries += 1
+                        if retries == 3:
+                            raise RuntimeError(f"Failed to enable {domain} domain after 3 attempts: {e}")
+                        logger.warning(f"Failed to enable {domain} domain (attempt {retries}): {e}")
+                        await asyncio.sleep(1)
+            
+            # Initialize page after domains are enabled
+            logger.debug("Initializing page...")
+            await page.initialize()
+            
+            # Wait for execution context to be ready with a longer timeout
+            logger.debug("Waiting for execution context...")
+            await page.wait_for_execution_context(timeout=10.0)
             
             # Apply stealth patches
             logger.debug("Applying stealth patches...")
@@ -50,6 +68,7 @@ class StealthBrowser(Browser):
             
             # Apply user agent if specified
             if self.profile.user_agent:
+                logger.debug("Setting user agent...")
                 await page.send_command("Network.setUserAgentOverride", {
                     "userAgent": self.profile.user_agent,
                     "platform": "MacIntel",
@@ -72,12 +91,17 @@ class StealthBrowser(Browser):
                 })
             
             # Apply viewport settings
+            logger.debug("Setting viewport...")
             await page.send_command("Emulation.setDeviceMetricsOverride", {
                 "width": self.profile.window_size["width"],
                 "height": self.profile.window_size["height"],
                 "deviceScaleFactor": 1,
                 "mobile": False
             })
+            
+            # Verify execution context is still valid
+            logger.debug("Verifying execution context...")
+            await page.evaluate("1 + 1")
             
             logger.debug("Successfully created stealth page")
             return page
@@ -97,25 +121,100 @@ class StealthBrowser(Browser):
             
             # Get ordered patches based on profile level
             ordered_patches = get_ordered_patches(self.profile.level)
+            logger.debug(f"Ordered patches: {[name for name, _ in ordered_patches]}")
             
-            # Apply each patch in order
+            # Apply each patch in order and verify
             for name, patch in ordered_patches:
                 try:
                     logger.debug(f"Applying patch: {name}")
+                    
+                    # Add the script to evaluate on new document
                     await page.send_command("Page.addScriptToEvaluateOnNewDocument", {
-                        "source": patch["script"]
+                        "source": patch["script"],
+                        "worldName": "main"  # Ensure script runs in main world
                     })
+                    
+                    # Also evaluate immediately in current context
+                    await page.evaluate(patch["script"])
+                    
+                    # Verify the patch worked by checking a key property
+                    if name == "chrome_runtime_basic":
+                        result = await page.evaluate("typeof window.chrome === 'object'")
+                        logger.debug(f"Chrome object verification: {result}")
+                        if not result:
+                            raise RuntimeError(f"Failed to initialize Chrome object in {name}")
+                    elif name == "chrome_runtime_advanced":
+                        result = await page.evaluate("typeof window.chrome.runtime === 'object'")
+                        logger.debug(f"Chrome runtime verification: {result}")
+                        if not result:
+                            raise RuntimeError(f"Failed to initialize Chrome runtime in {name}")
+                    elif name == "webdriver":
+                        result = await page.evaluate("navigator.webdriver === undefined")
+                        logger.debug(f"Navigator verification: {result}")
+                        if not result:
+                            raise RuntimeError(f"Failed to patch webdriver in {name}")
+                    elif name == "plugins":
+                        result = await page.evaluate("navigator.plugins.length > 0")
+                        logger.debug(f"Plugins verification: {result}")
+                        if not result:
+                            raise RuntimeError(f"Failed to initialize plugins in {name}")
+                    
                 except Exception as patch_error:
                     logger.error(f"Error applying patch {name}: {patch_error}")
+                    raise
             
-            # Wait for patches to settle
-            await asyncio.sleep(0.1)
+            # Final verification of all patches
+            verification = await page.evaluate("""
+                (() => {
+                    const results = {};
+                    try {
+                        results.chrome = typeof window.chrome === 'object';
+                        results.runtime = window.chrome && typeof window.chrome.runtime === 'object';
+                        results.webdriver = navigator.webdriver === undefined;
+                        results.vendor = navigator.vendor === 'Google Inc.';
+                        results.plugins = navigator.plugins.length > 0;
+                        results.error = null;
+                    } catch (e) {
+                        results.error = e.message;
+                    }
+                    return results;
+                })()
+            """)
             
-            logger.debug("Successfully applied all stealth patches")
+            logger.debug(f"Final stealth verification: {verification}")
+            
+            if verification.get('error'):
+                raise RuntimeError(f"Error during final verification: {verification['error']}")
+            
+            if not verification.get('chrome'):
+                raise RuntimeError("Chrome object not properly initialized")
+            if not verification.get('runtime'):
+                raise RuntimeError("Chrome runtime not properly initialized")
+            if not verification.get('webdriver'):
+                raise RuntimeError("Webdriver property not properly patched")
+            
+            logger.debug("Successfully applied and verified all stealth patches")
             
         except Exception as e:
             logger.error(f"Failed to apply stealth patches: {e}")
+            # Get current state for debugging
+            try:
+                state = await page.evaluate("""
+                    (() => ({
+                        chrome: typeof window.chrome,
+                        runtime: window.chrome ? typeof window.chrome.runtime : undefined,
+                        webdriver: navigator.webdriver,
+                        vendor: navigator.vendor,
+                        plugins: navigator.plugins ? navigator.plugins.length : 0
+                    }))()
+                """)
+                logger.error(f"Current state: {state}")
+            except Exception as state_error:
+                logger.error(f"Failed to get current state: {state_error}")
             raise RuntimeError(f"Failed to apply stealth patches: {e}")
+            
+        # Wait for everything to settle
+        await asyncio.sleep(0.5)
     
     def get_profile(self) -> StealthProfile:
         """Get the current stealth profile."""

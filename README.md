@@ -248,29 +248,30 @@ CHROME_AVAILABLE=1 PYTHONPATH=. pytest -vs tests/test_stealth_fingerprint.py
 
 | Feature/Capability | Description | Status |
 |-------------------|-------------|--------|
-| WebDriver Property | Hiding the `navigator.webdriver` property | ⚠️ Partially Working |
-| Chrome Runtime | Emulating Chrome browser runtime | ✅ Working |
-| User Agent Spoofing | Setting realistic user agents | ✅ Working |
-| Window Size | Customizing window dimensions | ✅ Working |
-| Languages | Setting browser language preferences | ✅ Working |
-| Plugins | Emulating browser plugins | ✅ Working |
-| Worker User Agent | Consistent user agent in Web Workers | ⚠️ Partially Working |
-| Function Prototypes | Fixing modified function signatures | ✅ Working |
-| iFrame Handling | Consistent behavior in iframes | ⚠️ Partially Working |
-| JavaScript Challenge Response | Solving JS-based challenges | ❌ Needs Improvement |
-| Mouse/Keyboard Behavior | Emulating human-like input patterns | ❌ Not Implemented Yet |
-| Cloudflare Turnstile | Bypassing Cloudflare's CAPTCHA system | ❌ Not Working |
-| Browser Fingerprinting | Avoiding canvas, WebGL, font detection | ⚠️ Partial |
-| TLS Fingerprinting | Mimicking browser TLS signatures | ❌ Not Implemented Yet |
-| Audio/Canvas Fingerprinting | Evading audio/canvas fingerprinting | ⚠️ Partially Working |
+| Basic Page Loading | Navigation and content verification | ✅ Stable |
+| Domain Initialization | Enabling Network, Page, Runtime domains | ✅ Improved with retries |
+| Stealth Patches | Anti-detection script injection | ✅ Verified with tests |
+| Chrome Runtime | Browser API emulation | ✅ Enhanced verification |
+| WebDriver | Property removal and masking | ✅ Tested |
+| User Agent | Custom browser identification | ✅ Configurable |
+| Window Size | Viewport customization | ✅ Configurable |
+| Plugin Emulation | Browser plugin simulation | ✅ Basic support |
+| Advanced Stealth | Experimental anti-detection features | ⚠️ In progress |
+| Cloudflare Bypass | Challenge response automation | ❌ Not implemented |
 
-While our stealth mode successfully avoids basic bot detection, some advanced fingerprinting techniques can still detect automation:
+### Recent Improvements
 
-- CreepJS detects the WebDriver property as "on"
-- Worker user agent is detected as headless
-- Some advanced fingerprinting services can detect inconsistencies
+- Enhanced initialization sequence with retry mechanisms
+- Improved domain enabling with better error handling
+- Added comprehensive logging for debugging
+- Strengthened stealth verification process
+- Implemented robust test suite for core functionality
 
-The implementation provides a good foundation but requires further enhancements to bypass more sophisticated detection mechanisms like Cloudflare's Turnstile CAPTCHA.
+### Known Limitations
+
+- Advanced fingerprinting services may still detect automation
+- Cloudflare's Turnstile CAPTCHA system cannot be bypassed
+- Some experimental stealth features need further testing
 
 ### Stealth Mode Examples
 
