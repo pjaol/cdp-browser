@@ -32,6 +32,22 @@ register_patch(
                     get: function() { return "${mainUserAgent}"; },
                     configurable: true
                 });
+                
+                // Also override other navigator properties for consistency
+                Object.defineProperty(navigator, 'vendor', {
+                    get: function() { return "Google Inc."; },
+                    configurable: true
+                });
+                
+                Object.defineProperty(navigator, 'platform', {
+                    get: function() { return "MacIntel"; },
+                    configurable: true
+                });
+                
+                Object.defineProperty(navigator, 'languages', {
+                    get: function() { return ['en-US', 'en']; },
+                    configurable: true
+                });
             `], { type: 'application/javascript' });
             
             // Create URL for the blob
@@ -73,14 +89,13 @@ register_patch(
         // Store important navigator properties
         const navigatorProps = {
             userAgent: navigator.userAgent,
-            appVersion: navigator.appVersion,
-            platform: navigator.platform,
-            vendor: navigator.vendor,
-            language: navigator.language,
+            vendor: 'Google Inc.',
+            platform: 'MacIntel',
+            languages: ['en-US', 'en'],
             deviceMemory: navigator.deviceMemory,
             hardwareConcurrency: navigator.hardwareConcurrency,
-            appName: navigator.appName,
-            appCodeName: navigator.appCodeName,
+            appName: 'Netscape',
+            appCodeName: 'Mozilla',
             cookieEnabled: navigator.cookieEnabled,
             doNotTrack: navigator.doNotTrack,
             maxTouchPoints: navigator.maxTouchPoints,

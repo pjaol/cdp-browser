@@ -14,26 +14,18 @@ register_patch(
     priority=39,  # Run before other Chrome patches
     script="""
     (() => {
-        // Helper to make functions look native
-        const makeNativeFunction = (fn, name = '') => {
+        // Simple helper to make functions look native
+        window.makeNativeFunction = function(fn, name) {
             const wrapped = function() {
                 return fn.apply(this, arguments);
             };
-            Object.defineProperty(wrapped, 'name', { value: name });
-            Object.defineProperty(wrapped, 'toString', {
-                value: () => `function ${name}() { [native code] }`,
-                configurable: true
-            });
+            
+            wrapped.toString = function() {
+                return "function " + (name || fn.name || "") + "() { [native code] }";
+            };
+            
             return wrapped;
         };
-        
-        // Make it globally available
-        Object.defineProperty(window, 'makeNativeFunction', {
-            value: makeNativeFunction,
-            configurable: false,
-            enumerable: false,
-            writable: false
-        });
     })();
     """
 )
@@ -65,22 +57,22 @@ register_patch(
             // Add toString tag
             Object.defineProperty(chrome, Symbol.toStringTag, { value: 'Chrome' });
             
-            // Make functions look native
-            const makeNativeFunction = (fn, name = '') => {
+            // Simple helper to make functions look native if makeNativeFunction isn't available yet
+            const makeNative = (fn, name = '') => {
                 const wrapped = function() {
                     return fn.apply(this, arguments);
                 };
-                Object.defineProperty(wrapped, 'name', { value: name });
-                Object.defineProperty(wrapped, 'toString', {
-                    value: () => `function ${name}() { [native code] }`,
-                    configurable: true
-                });
+                
+                wrapped.toString = function() {
+                    return "function " + (name || fn.name || "") + "() { [native code] }";
+                };
+                
                 return wrapped;
             };
             
             // Apply native function wrapper
-            chrome.loadTimes = makeNativeFunction(chrome.loadTimes, 'loadTimes');
-            chrome.csi = makeNativeFunction(chrome.csi, 'csi');
+            chrome.loadTimes = makeNative(chrome.loadTimes, 'loadTimes');
+            chrome.csi = makeNative(chrome.csi, 'csi');
         }
     })();
     """
@@ -91,23 +83,11 @@ register_patch(
     name="chrome_runtime_advanced",
     description="Advanced Chrome runtime emulation with full API support",
     priority=41,
-    dependencies=["chrome_runtime_basic"],
+    dependencies=["chrome_runtime_basic", "chrome_helpers"],
     script="""
     (() => {
         if (!window.chrome) return;  // Ensure basic patch ran first
-        
-        // Helper to make functions look native
-        const makeNativeFunction = (fn, name = '') => {
-            const wrapped = function() {
-                return fn.apply(this, arguments);
-            };
-            Object.defineProperty(wrapped, 'name', { value: name });
-            Object.defineProperty(wrapped, 'toString', {
-                value: () => `function ${name}() { [native code] }`,
-                configurable: true
-            });
-            return wrapped;
-        };
+        if (!window.makeNativeFunction) return; // Ensure chrome_helpers ran first
         
         // Create runtime object with proper prototype
         const runtime = Object.create(EventTarget.prototype);
@@ -133,7 +113,7 @@ register_patch(
         
         // Add methods to runtime object
         for (const [name, fn] of Object.entries(runtimeMethods)) {
-            runtime[name] = makeNativeFunction(fn, name);
+            runtime[name] = window.makeNativeFunction(fn, name);
         }
         
         // Define runtime properties
@@ -165,14 +145,14 @@ register_patch(
         const app = {
             InstallState: Object.freeze({ DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }),
             RunningState: Object.freeze({ CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' }),
-            getDetails: makeNativeFunction(function() { return {}; }, 'getDetails'),
-            getIsInstalled: makeNativeFunction(function() { return false; }, 'getIsInstalled'),
-            installState: makeNativeFunction(function() { return 'not_installed'; }, 'installState'),
+            getDetails: window.makeNativeFunction(function() { return {}; }, 'getDetails'),
+            getIsInstalled: window.makeNativeFunction(function() { return false; }, 'getIsInstalled'),
+            installState: window.makeNativeFunction(function() { return 'not_installed'; }, 'installState'),
             isInstalled: false,
             window: {
                 get current() { return null; },
-                create: makeNativeFunction(function() { return {}; }, 'create'),
-                getAll: makeNativeFunction(function() { return []; }, 'getAll')
+                create: window.makeNativeFunction(function() { return {}; }, 'create'),
+                getAll: window.makeNativeFunction(function() { return []; }, 'getAll')
             }
         };
         
@@ -181,7 +161,7 @@ register_patch(
             runtime: { value: runtime, configurable: false, enumerable: true, writable: false },
             app: { value: app, configurable: false, enumerable: true, writable: false },
             csi: {
-                value: makeNativeFunction(function() {
+                value: window.makeNativeFunction(function() {
                     return {
                         startE: Date.now(),
                         onloadT: Date.now(),
@@ -194,7 +174,7 @@ register_patch(
                 writable: false
             },
             loadTimes: {
-                value: makeNativeFunction(function() {
+                value: window.makeNativeFunction(function() {
                     return {
                         commitLoadTime: Date.now() / 1000,
                         connectionInfo: "h2",
@@ -228,49 +208,137 @@ register_patch(
     dependencies=["chrome_runtime_basic", "chrome_runtime_advanced"],
     script="""
     (() => {
-        if (!window.chrome) return;  // Ensure previous patches ran
-        
-        // Helper to make functions look native
-        const makeNativeFunction = (fn, name = '') => {
-            const wrapped = function() {
-                return fn.apply(this, arguments);
-            };
-            Object.defineProperty(wrapped, 'name', { value: name });
-            Object.defineProperty(wrapped, 'toString', {
-                value: () => `function ${name}() { [native code] }`,
-                configurable: true
-            });
-            return wrapped;
-        };
-        
-        // Add permissions API
-        Object.defineProperty(window.chrome, 'permissions', {
-            value: {
-                getAll: makeNativeFunction(function(callback) {
+        try {
+            if (!window.chrome) return;  // Ensure previous patches ran
+            
+            // Create permissions API methods
+            const permissionsAPI = {
+                getAll: function(callback) {
                     const permissions = { permissions: [], origins: [] };
                     if (callback) callback(permissions);
                     return Promise.resolve(permissions);
-                }, 'getAll'),
-                contains: makeNativeFunction(function(permissions, callback) {
+                },
+                contains: function(permissions, callback) {
                     const result = false;
                     if (callback) callback(result);
                     return Promise.resolve(result);
-                }, 'contains'),
-                request: makeNativeFunction(function(permissions, callback) {
+                },
+                request: function(permissions, callback) {
                     const result = false;
                     if (callback) callback(result);
                     return Promise.resolve(result);
-                }, 'request'),
-                remove: makeNativeFunction(function(permissions, callback) {
+                },
+                remove: function(permissions, callback) {
                     const result = false;
                     if (callback) callback(result);
                     return Promise.resolve(result);
-                }, 'remove')
-            },
-            configurable: false,
-            enumerable: true,
-            writable: false
-        });
+                }
+            };
+            
+            // Use window.makeNativeFunction if it's defined from chrome_helpers patch
+            const makeNativeFunc = window.makeNativeFunction || function(fn, name) {
+                const wrapped = function() {
+                    return fn.apply(this, arguments);
+                };
+                
+                wrapped.toString = function() {
+                    return "function " + (name || fn.name || "") + "() { [native code] }";
+                };
+                
+                return wrapped;
+            };
+            
+            // Wrap each method with makeNative
+            const wrappedPermissions = {};
+            for (const [key, fn] of Object.entries(permissionsAPI)) {
+                wrappedPermissions[key] = makeNativeFunc(fn, key);
+            }
+            
+            // Add to chrome object - using safer direct property assignment
+            if (window.chrome && !window.chrome.permissions) {
+                window.chrome.permissions = wrappedPermissions;
+                
+                // Make it look more native with non-configurable property after assignment
+                if (Object.defineProperty) {
+                    try {
+                        Object.defineProperty(window.chrome, 'permissions', {
+                            value: wrappedPermissions,
+                            configurable: false,
+                            enumerable: true,
+                            writable: false
+                        });
+                    } catch (defineError) {
+                        console.error("Error making permissions non-configurable:", defineError);
+                        // Property already exists, so we're fine continuing
+                    }
+                }
+            }
+        } catch (e) {
+            console.error("Error in chrome_permissions patch:", e);
+            // Don't throw to avoid breaking the page
+        }
+    })();
+    """
+)
+
+# Function prototypes patch
+register_patch(
+    name="function_prototypes",
+    description="Make function prototypes appear native",
+    priority=30,  # Run before all other patches
+    script="""
+    (() => {
+        // Create a debugging function to help identify issues
+        const debug = (msg) => {
+            // Uncomment for debugging
+            // console.debug('function_prototypes patch: ' + msg);
+        };
+        
+        try {
+            debug('Storing original toString');
+            // Store original toString
+            const originalToString = Function.prototype.toString;
+            
+            debug('Creating toString override');
+            // Create simple toString override
+            Function.prototype.toString = function() {
+                // For native functions, return native code string
+                const fnName = this.name || "";
+                debug('toString called for: ' + fnName);
+                
+                // Special cases for specific functions
+                if (this === Function.prototype.toString || 
+                    this === Object.getOwnPropertyDescriptor || 
+                    this === Object.defineProperty ||
+                    fnName.startsWith("get") || 
+                    fnName.startsWith("set") || 
+                    fnName === "toString" || 
+                    fnName === "valueOf" || 
+                    fnName === "constructor" || 
+                    fnName === "hasOwnProperty") {
+                    debug('Returning native string for: ' + fnName);
+                    return `function ${fnName}() { [native code] }`;
+                }
+                
+                // For all other functions, use the original toString
+                debug('Using original toString for: ' + fnName);
+                return originalToString.call(this);
+            };
+            
+            debug('Setting toString property');
+            // Make toString look native
+            Object.defineProperty(Function.prototype.toString, "toString", {
+                value: function() { return "function toString() { [native code] }"; },
+                writable: false,
+                configurable: true,
+                enumerable: false
+            });
+            
+            debug('Function prototype patch completed successfully');
+        } catch (e) {
+            // Log any errors but don't throw
+            console.error('Error in function_prototypes patch:', e);
+        }
     })();
     """
 ) 

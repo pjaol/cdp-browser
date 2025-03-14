@@ -400,7 +400,7 @@ class Page:
                         if "Session with given id not found" in str(e):
                             logger.debug(f"Session {self.session_id} already detached")
                         else:
-                            logger.error(f"Error detaching from target: {e}")
+                            logger.debug(f"Error detaching from target (this is expected if the session is already closed): {e}")
                 else:
                     logger.debug("No session ID available for detaching from target")
 
@@ -787,17 +787,42 @@ class Page:
 
             # Now try to evaluate the expression
             try:
-                # Wrap the expression in a try-catch block to capture JavaScript errors
-                wrapped_expression = f"""
-                    (() => {{
-                        try {{
-                            const result = {expression};
-                            return result;
-                        }} catch (e) {{
-                            return {{ __error__: e.message }};
-                        }}
-                    }})()
-                """
+                # Check if the expression is an arrow function
+                is_arrow_function = expression.strip().startswith("() =>")
+                
+                # Wrap the expression appropriately
+                if is_arrow_function:
+                    # For arrow functions, invoke them immediately
+                    wrapped_expression = f"""
+                        (() => {{
+                            try {{
+                                const fn = {expression};
+                                return fn();
+                            }} catch (e) {{
+                                return {{ 
+                                    __error__: e.message,
+                                    __stack__: e.stack || 'No stack trace available',
+                                    __name__: e.name || 'Error'
+                                }};
+                            }}
+                        }})()
+                    """
+                else:
+                    # For other expressions, wrap in try-catch
+                    wrapped_expression = f"""
+                        (() => {{
+                            try {{
+                                const result = {expression};
+                                return result;
+                            }} catch (e) {{
+                                return {{ 
+                                    __error__: e.message,
+                                    __stack__: e.stack || 'No stack trace available',
+                                    __name__: e.name || 'Error'
+                                }};
+                            }}
+                        }})()
+                    """
 
                 result = await self.send_command(
                     "Runtime.evaluate",
@@ -833,6 +858,9 @@ class Page:
                 error_message = details.get('text', 'Unknown error')
                 if 'exception' in details:
                     error_message += f": {details['exception'].get('description', '')}"
+                error_name = details.get('exception', {}).get('name', 'Error')
+                stack_trace = details.get('exception', {}).get('stack', 'No stack trace available')
+                logger.error(f"JavaScript {error_name}: {error_message}\nStack Trace: {stack_trace}")
                 raise PageError(f"JavaScript evaluation failed: {error_message}")
 
             if "result" not in result:
@@ -851,7 +879,11 @@ class Page:
             elif result_type == "object":
                 if return_by_value:
                     if isinstance(result_value, dict) and "__error__" in result_value:
-                        raise PageError(f"JavaScript error: {result_value['__error__']}")
+                        error_msg = result_value['__error__']
+                        stack_trace = result_value.get('__stack__', 'No stack trace available')
+                        error_name = result_value.get('__name__', 'Error')
+                        logger.error(f"JavaScript {error_name}: {error_msg}\nStack Trace: {stack_trace}")
+                        raise PageError(f"JavaScript error: {error_msg}")
                     return result_value if result_value is not None else {}
                 else:
                     # For objects when not returning by value, return the remote object

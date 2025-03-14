@@ -14,15 +14,11 @@ register_patch(
     priority=20,
     script="""
     (() => {
-        // Store the current user agent
-        const userAgent = navigator.userAgent;
-        
-        // Override navigator properties
+        // Only override properties that can't be set via CDP
         const navigatorProps = {
-            userAgent: userAgent,
-            appVersion: userAgent.replace('Mozilla/', ''),
-            platform: 'MacIntel',
-            vendor: 'Google Inc.'
+            vendor: 'Google Inc.',
+            languages: ['en-US', 'en'],
+            platform: 'MacIntel'  // Match the platform to the user agent string
         };
         
         // Apply navigator property overrides
@@ -48,167 +44,201 @@ register_patch(
     priority=21,
     script="""
     (() => {
-        // Helper to make functions look native
-        const makeNativeFunction = (fn, name = '') => {
-            const originalFunction = window.Function;
-            const wrapped = originalFunction('return ' + fn)();
-            Object.defineProperty(wrapped, 'name', { value: name });
-            Object.defineProperty(wrapped, 'toString', {
-                value: function() { return `function ${name || fn.name || ''}() { [native code] }` },
+        // Store original methods first at the top level before any modifications
+        const originalFunction = window.Function;
+        const originalObjectDefineProperty = Object.defineProperty;
+        const originalObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+        const originalToString = Function.prototype.toString;
+
+        // Helper to make a function look native without using the functions we're about to modify
+        const utilMakeNativeFunction = (fn, name = '') => {
+            // Create a new function with the same body
+            const functionBody = fn.toString().replace(/^[^{]*{/, '').replace(/}[^}]*$/, '');
+            const wrapped = originalFunction('return (function ' + name + '() {' + functionBody + '})')();
+            
+            // Make the function look native
+            originalObjectDefineProperty(wrapped, 'name', {
+                value: name,
                 configurable: true,
+                enumerable: false,
+                writable: false
+            });
+            
+            // Make toString look native
+            originalObjectDefineProperty(wrapped, 'toString', {
+                value: function() {
+                    return `function ${name || fn.name || ''}() { [native code] }`;
+                },
+                configurable: true,
+                enumerable: false,
                 writable: true
             });
+            
+            // Make toString.toString look native
+            originalObjectDefineProperty(wrapped.toString, 'toString', {
+                value: function() {
+                    return `function toString() { [native code] }`;
+                },
+                configurable: true,
+                enumerable: false,
+                writable: true
+            });
+            
+            // Set length property
+            originalObjectDefineProperty(wrapped, 'length', {
+                value: fn.length,
+                configurable: true,
+                enumerable: false,
+                writable: false
+            });
+            
+            // Ensure prototype chain is correct
+            Object.setPrototypeOf(wrapped, Function.prototype);
+            
             return wrapped;
         };
-        
-        // Parse user agent to extract components
-        const parseUserAgent = (ua) => {
-            const result = {
-                browser: 'Chrome',
-                browserVersion: '121.0.0.0',
-                engine: 'WebKit',
-                engineVersion: '537.36',
-                os: 'Mac OS X',
-                osVersion: '10_15_7',
-                device: '',
-                isWindows: false,
-                isMac: true,
-                isLinux: false,
-                isAndroid: false,
-                isIOS: false
-            };
-            
-            // Extract browser and version
-            const chromeMatch = ua.match(/Chrome\\/([\\d.]+)/);
-            if (chromeMatch) {
-                result.browserVersion = chromeMatch[1];
+
+        // Native-looking getOwnPropertyDescriptor
+        const nativeGetOwnPropertyDescriptor = function getOwnPropertyDescriptor(obj, prop) {
+            // Handle special cases first
+            if (obj === Object && (prop === 'getOwnPropertyDescriptor' || prop === 'defineProperty')) {
+                // Make Object methods appear native
+                return {
+                    value: obj[prop],
+                    writable: true,
+                    enumerable: false,
+                    configurable: true
+                };
             }
             
-            // Extract engine version
-            const webkitMatch = ua.match(/AppleWebKit\\/([\\d.]+)/);
-            if (webkitMatch) {
-                result.engineVersion = webkitMatch[1];
+            // Check for wrapped functions with toString
+            if (obj && typeof obj === 'function' && prop === 'toString' && 
+                obj.toString && obj.toString.toString && 
+                obj.toString.toString() === 'function toString() { [native code] }') {
+                return {
+                    value: obj.toString,
+                    writable: true,
+                    enumerable: false,
+                    configurable: true
+                };
             }
             
-            // Extract OS and version
-            if (ua.includes('Windows')) {
-                result.os = 'Windows';
-                result.isWindows = true;
-                result.isMac = false;
-                
-                const windowsMatch = ua.match(/Windows NT ([\\d.]+)/);
-                if (windowsMatch) {
-                    result.osVersion = windowsMatch[1];
-                    // Map Windows NT version to Windows version
-                    const windowsVersions = {
-                        '10.0': '10',
-                        '6.3': '8.1',
-                        '6.2': '8',
-                        '6.1': '7',
-                        '6.0': 'Vista',
-                        '5.2': 'XP',
-                        '5.1': 'XP'
-                    };
-                    result.osVersionName = windowsVersions[result.osVersion] || '';
-                }
-            } else if (ua.includes('Mac OS X')) {
-                result.os = 'Mac OS X';
-                result.isMac = true;
-                
-                const macMatch = ua.match(/Mac OS X ([\\d_]+)/);
-                if (macMatch) {
-                    result.osVersion = macMatch[1];
-                }
-            } else if (ua.includes('Linux')) {
-                result.os = 'Linux';
-                result.isLinux = true;
-                result.isMac = false;
-            } else if (ua.includes('Android')) {
-                result.os = 'Android';
-                result.isAndroid = true;
-                result.isMac = false;
-                
-                const androidMatch = ua.match(/Android ([\\d.]+)/);
-                if (androidMatch) {
-                    result.osVersion = androidMatch[1];
-                }
-            } else if (ua.includes('iPhone') || ua.includes('iPad') || ua.includes('iPod')) {
-                result.os = 'iOS';
-                result.isIOS = true;
-                result.isMac = false;
-                
-                const iosMatch = ua.match(/OS ([\\d_]+)/);
-                if (iosMatch) {
-                    result.osVersion = iosMatch[1];
-                }
+            // Handle webdriver property on navigator
+            if (obj === navigator && prop === 'webdriver') {
+                return undefined;
             }
             
-            return result;
+            // For all other cases, defer to the original method
+            return originalObjectGetOwnPropertyDescriptor.apply(this, arguments);
         };
-        
-        // Get the current user agent
-        const userAgent = navigator.userAgent;
-        const parsedUA = parseUserAgent(userAgent);
-        
-        // Create consistent navigator properties
-        const navigatorProps = {
-            userAgent: userAgent,
-            appVersion: userAgent.replace('Mozilla/', ''),
-            platform: parsedUA.isMac ? 'MacIntel' : 
-                      parsedUA.isWindows ? 'Win32' : 
-                      parsedUA.isLinux ? 'Linux x86_64' : 
-                      parsedUA.isAndroid ? 'Linux armv8l' : 
-                      parsedUA.isIOS ? 'iPhone' : 'MacIntel',
-            vendor: 'Google Inc.',
-            appName: 'Netscape',
-            appCodeName: 'Mozilla'
-        };
-        
-        // Apply navigator property overrides
-        for (const [key, value] of Object.entries(navigatorProps)) {
-            try {
-                Object.defineProperty(navigator, key, {
-                    get: () => value,
-                    configurable: true,
-                    enumerable: true
-                });
-            } catch (e) {
-                // Ignore errors
+
+        // Native-looking defineProperty
+        const nativeDefineProperty = function defineProperty(obj, prop, descriptor) {
+            // Special case for wrapped functions
+            if (obj && typeof obj === 'function' && prop === 'toString' &&
+                obj.toString && obj.toString.toString && 
+                obj.toString.toString() === 'function toString() { [native code] }') {
+                // Preserve the native-looking toString
+                return obj;
             }
-        }
+            
+            // For all other cases, defer to the original method
+            return originalObjectDefineProperty.apply(this, arguments);
+        };
+
+        // Create wrapper functions that appear native
+        const wrappedGetOwnPropertyDescriptor = utilMakeNativeFunction(nativeGetOwnPropertyDescriptor, 'getOwnPropertyDescriptor');
+        const wrappedDefineProperty = utilMakeNativeFunction(nativeDefineProperty, 'defineProperty');
+
+        // Install our wrapped functions
+        originalObjectDefineProperty(Object, 'getOwnPropertyDescriptor', {
+            value: wrappedGetOwnPropertyDescriptor,
+            writable: true,
+            enumerable: false,
+            configurable: true
+        });
+
+        originalObjectDefineProperty(Object, 'defineProperty', {
+            value: wrappedDefineProperty,
+            writable: true,
+            enumerable: false,
+            configurable: true
+        });
+
+        // Create a helper for general use
+        const makeNativeFunction = (fn, name = '') => {
+            // Create a new function with the same body
+            const functionBody = fn.toString().replace(/^[^{]*{/, '').replace(/}[^}]*$/, '');
+            const wrapped = Function('return (function ' + name + '() {' + functionBody + '})')();
+            
+            // Make the function look native
+            Object.defineProperty(wrapped, 'name', {
+                value: name,
+                configurable: true,
+                enumerable: false,
+                writable: false
+            });
+            
+            // Make toString look native
+            Object.defineProperty(wrapped, 'toString', {
+                value: function() {
+                    return `function ${name || fn.name || ''}() { [native code] }`;
+                },
+                configurable: true,
+                enumerable: false,
+                writable: true
+            });
+            
+            // Make toString.toString look native
+            Object.defineProperty(wrapped.toString, 'toString', {
+                value: function() {
+                    return `function toString() { [native code] }`;
+                },
+                configurable: true,
+                enumerable: false,
+                writable: true
+            });
+            
+            // Set length property
+            Object.defineProperty(wrapped, 'length', {
+                value: fn.length,
+                configurable: true,
+                enumerable: false,
+                writable: false
+            });
+            
+            // Ensure prototype chain is correct
+            Object.setPrototypeOf(wrapped, Function.prototype);
+            
+            return wrapped;
+        };
         
         // Override navigator.userAgentData if available
         if ('userAgentData' in navigator) {
             try {
                 const brands = [
-                    { brand: "Chrome", version: parsedUA.browserVersion.split('.')[0] },
-                    { brand: "Chromium", version: parsedUA.browserVersion.split('.')[0] },
+                    { brand: "Chrome", version: "121" },
+                    { brand: "Chromium", version: "121" },
                     { brand: "Not=A?Brand", version: "24" }
                 ];
                 
-                const mobile = parsedUA.isAndroid || parsedUA.isIOS;
-                
-                const platform = parsedUA.isMac ? 'macOS' : 
-                                parsedUA.isWindows ? 'Windows' : 
-                                parsedUA.isLinux ? 'Linux' : 
-                                parsedUA.isAndroid ? 'Android' : 
-                                parsedUA.isIOS ? 'iOS' : 'macOS';
+                const platform = 'macOS';
                 
                 // Create a fake userAgentData object
                 const uaData = {
                     brands: brands,
-                    mobile: mobile,
+                    mobile: false,
                     platform: platform,
                     getHighEntropyValues: makeNativeFunction(function getHighEntropyValues(hints) {
                         return Promise.resolve({
                             brands: brands,
-                            mobile: mobile,
+                            mobile: false,
                             platform: platform,
-                            architecture: parsedUA.isMac || parsedUA.isWindows ? 'x86' : 'arm',
+                            architecture: 'x86',
                             bitness: '64',
                             model: '',
-                            platformVersion: parsedUA.osVersion.replace(/_/g, '.'),
-                            uaFullVersion: parsedUA.browserVersion,
+                            platformVersion: '10.15.7',
+                            uaFullVersion: '121.0.0.0',
                             fullVersionList: brands,
                             wow64: false
                         });
@@ -255,72 +285,56 @@ register_patch(
             }
         }
         
-        // Override navigator.languages
-        try {
-            Object.defineProperty(navigator, 'languages', {
-                get: () => ['en-US', 'en'],
-                configurable: true,
-                enumerable: true
-            });
-        } catch (e) {
-            // Ignore errors
-        }
-        
-        // Override navigator.mimeTypes and plugins to match the user agent
+        // Override navigator.plugins and mimeTypes to match the user agent
         try {
             // Create consistent mimeTypes and plugins based on the browser
             const createPlugins = () => {
-                const plugins = [];
-                
-                // Add Chrome PDF Plugin
-                plugins.push({
-                    name: 'Chrome PDF Plugin',
-                    filename: 'internal-pdf-viewer',
-                    description: 'Portable Document Format',
-                    length: 1,
-                    item: function(index) { return this[index]; },
-                    namedItem: function(name) { return this[name]; },
-                    0: {
-                        type: 'application/x-google-chrome-pdf',
-                        suffixes: 'pdf',
-                        description: 'Portable Document Format'
-                    }
-                });
-                
-                // Add Chrome PDF Viewer
-                plugins.push({
-                    name: 'Chrome PDF Viewer',
-                    filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai',
-                    description: '',
-                    length: 1,
-                    item: function(index) { return this[index]; },
-                    namedItem: function(name) { return this[name]; },
-                    0: {
-                        type: 'application/pdf',
-                        suffixes: 'pdf',
-                        description: ''
-                    }
-                });
-                
-                // Add Native Client
-                plugins.push({
-                    name: 'Native Client',
-                    filename: 'internal-nacl-plugin',
-                    description: '',
-                    length: 2,
-                    item: function(index) { return this[index]; },
-                    namedItem: function(name) { return this[name]; },
-                    0: {
-                        type: 'application/x-nacl',
-                        suffixes: '',
-                        description: 'Native Client Executable'
+                const plugins = [
+                    {
+                        name: 'Chrome PDF Plugin',
+                        filename: 'internal-pdf-viewer',
+                        description: 'Portable Document Format',
+                        length: 1,
+                        item: makeNativeFunction(function(index) { return this[index]; }, 'item'),
+                        namedItem: makeNativeFunction(function(name) { return this[name]; }, 'namedItem'),
+                        0: {
+                            type: 'application/x-google-chrome-pdf',
+                            suffixes: 'pdf',
+                            description: 'Portable Document Format'
+                        }
                     },
-                    1: {
-                        type: 'application/x-pnacl',
-                        suffixes: '',
-                        description: 'Portable Native Client Executable'
+                    {
+                        name: 'Chrome PDF Viewer',
+                        filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai',
+                        description: '',
+                        length: 1,
+                        item: makeNativeFunction(function(index) { return this[index]; }, 'item'),
+                        namedItem: makeNativeFunction(function(name) { return this[name]; }, 'namedItem'),
+                        0: {
+                            type: 'application/pdf',
+                            suffixes: 'pdf',
+                            description: ''
+                        }
+                    },
+                    {
+                        name: 'Native Client',
+                        filename: 'internal-nacl-plugin',
+                        description: '',
+                        length: 2,
+                        item: makeNativeFunction(function(index) { return this[index]; }, 'item'),
+                        namedItem: makeNativeFunction(function(name) { return this[name]; }, 'namedItem'),
+                        0: {
+                            type: 'application/x-nacl',
+                            suffixes: '',
+                            description: 'Native Client Executable'
+                        },
+                        1: {
+                            type: 'application/x-pnacl',
+                            suffixes: '',
+                            description: 'Portable Native Client Executable'
+                        }
                     }
-                });
+                ];
                 
                 return plugins;
             };
@@ -330,16 +344,16 @@ register_patch(
             // Create a plugins array with the correct properties
             const pluginsArray = {
                 length: plugins.length,
-                item: function(index) { return this[index]; },
-                namedItem: function(name) { 
+                item: makeNativeFunction(function(index) { return this[index]; }, 'item'),
+                namedItem: makeNativeFunction(function(name) { 
                     for (let i = 0; i < this.length; i++) {
                         if (this[i].name === name) {
                             return this[i];
                         }
                     }
                     return null;
-                },
-                refresh: function() {}
+                }, 'namedItem'),
+                refresh: makeNativeFunction(function() {}, 'refresh')
             };
             
             // Add plugins to the array
@@ -351,8 +365,8 @@ register_patch(
             // Create a mimeTypes array
             const mimeTypesArray = {
                 length: 0,
-                item: function(index) { return this[index]; },
-                namedItem: function(name) { return this[name]; }
+                item: makeNativeFunction(function(index) { return this[index]; }, 'item'),
+                namedItem: makeNativeFunction(function(name) { return this[name]; }, 'namedItem')
             };
             
             // Add mimeTypes from plugins
