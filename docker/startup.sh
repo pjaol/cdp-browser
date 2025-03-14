@@ -9,7 +9,8 @@ DEFAULT_FLAGS="--remote-allow-origins=*\
 	--no-sandbox\
 	--disable-gpu\
 	--remote-debugging-address=0.0.0.0\
-	--remote-debugging-port=9222"
+	--remote-debugging-port=9222\
+	--disable-blink-features=AutomationControlled"
 
 	# --no-service-autorun\
 	# --no-default-browser-check\
