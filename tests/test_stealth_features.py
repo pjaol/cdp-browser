@@ -36,35 +36,69 @@ async def stealth_browser():
         yield browser
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(reason="WebDriver property detection still partially detectable")
 async def test_webdriver_property(stealth_browser):
-    """Test WebDriver property hiding."""
+    """Test WebDriver property emulation."""
     page = await stealth_browser.create_page()
     try:
-        # Test multiple ways of detecting webdriver
+        # Test that webdriver property exists but is set to false (like in real Chrome)
         result = await page.evaluate("""
             () => {
+                // Safely get property descriptor
+                const getDescriptor = () => {
+                    try {
+                        return Object.getOwnPropertyDescriptor(navigator, 'webdriver');
+                    } catch (e) {
+                        return null;
+                    }
+                };
+                
+                const descriptor = getDescriptor();
+                
                 const results = {
-                    directAccess: navigator.webdriver === undefined,
-                    prototypeCheck: !('webdriver' in Object.getPrototypeOf(navigator)),
-                    propertyDescriptor: Object.getOwnPropertyDescriptor(navigator, 'webdriver') === undefined,
-                    enumeration: !Object.keys(navigator).includes('webdriver'),
-                    proxyDetection: (() => {
-                        try {
-                            return !('webdriver' in new Proxy(navigator, {
-                                get: (target, prop) => prop === 'webdriver' ? true : target[prop]
-                            }));
-                        } catch (e) {
-                            return false;
-                        }
-                    })()
+                    // Property should exist but be false
+                    directAccess: navigator.webdriver === false,
+                    propertyExists: 'webdriver' in navigator,
+                    
+                    // Property should be properly defined
+                    hasOwnProperty: navigator.hasOwnProperty('webdriver'),
+                    
+                    // Descriptor details (if available)
+                    descriptorExists: descriptor !== null,
+                    descriptorConfigurable: descriptor ? descriptor.configurable : 'N/A',
+                    descriptorEnumerable: descriptor ? descriptor.enumerable : 'N/A',
+                    
+                    // Edge case checks
+                    notUndefined: navigator.webdriver !== undefined,
+                    notNull: navigator.webdriver !== null,
+                    
+                    // Make sure other automation indicators are not present
+                    noSelenium: !('selenium' in navigator),
+                    noCDP: !('cdp' in navigator),
+                    noDriver: !('driver' in navigator)
                 };
                 return results;
             }
         """)
         
-        logger.info(f"WebDriver detection results: {json.dumps(result, indent=2)}")
-        assert all(result.values()), "WebDriver property detected through one or more methods"
+        # Log detailed results
+        logger.info(f"WebDriver property test results:")
+        for key, value in result.items():
+            logger.info(f"{key}: {value}")
+        
+        # Check critical assertions
+        assert result['directAccess'], "navigator.webdriver should be false"
+        assert result['propertyExists'], "webdriver property should exist in navigator"
+        assert result['notUndefined'], "webdriver should not be undefined"
+        assert result['notNull'], "webdriver should not be null"
+        assert result['noSelenium'], "selenium property should not exist"
+        assert result['noCDP'], "cdp property should not exist"
+        assert result['noDriver'], "driver property should not exist"
+        
+        # Log descriptor information (informative, not critical)
+        if not result['descriptorExists']:
+            logger.warning("Property descriptor for webdriver could not be obtained")
+        
+        logger.info("WebDriver property correctly emulated")
     finally:
         await page.close()
 
@@ -182,27 +216,115 @@ async def test_plugins(stealth_browser):
     """Test plugins emulation."""
     page = await stealth_browser.create_page()
     try:
+        # Add more detailed debug info
+        debug_info = await page.evaluate("""
+            () => {
+                const debug = {
+                    pluginsObj: Object.prototype.toString.call(navigator.plugins),
+                    pluginsLength: navigator.plugins ? navigator.plugins.length : 'undefined',
+                    pluginsKeys: Object.keys(navigator.plugins || {}),
+                    pluginsPropertyNames: Object.getOwnPropertyNames(navigator.plugins || {}),
+                    isPluginsIterable: typeof navigator.plugins?.[Symbol.iterator] === 'function',
+                    mimeTypesObj: Object.prototype.toString.call(navigator.mimeTypes),
+                    mimeTypesLength: navigator.mimeTypes ? navigator.mimeTypes.length : 'undefined',
+                    mimeTypesKeys: Object.keys(navigator.mimeTypes || {}),
+                    mimeTypesPropertyNames: Object.getOwnPropertyNames(navigator.mimeTypes || {}),
+                    isMimeTypesIterable: typeof navigator.mimeTypes?.[Symbol.iterator] === 'function',
+                    hasPluginsBasic: typeof navigator.plugins === 'object' && navigator.plugins !== null,
+                    chromeExists: typeof window.chrome === 'object',
+                    runtimeExists: typeof window.chrome?.runtime === 'object'
+                };
+                
+                return debug;
+            }
+        """)
+        
+        print(f"Plugins debug info: {json.dumps(debug_info, indent=2)}")
+        logger.info(f"Plugins debug info: {json.dumps(debug_info, indent=2)}")
+        
+        # Check if any stealth patches have been applied
+        stealth_check = await page.evaluate("""
+            () => {
+                return {
+                    webdriver: navigator.webdriver,
+                    hasChrome: !!window.chrome,
+                    hasRuntime: !!(window.chrome && window.chrome.runtime),
+                    vendor: navigator.vendor,
+                    languages: navigator.languages,
+                    userAgent: navigator.userAgent
+                };
+            }
+        """)
+        
+        print(f"Stealth check: {json.dumps(stealth_check, indent=2)}")
+        logger.info(f"Stealth check: {json.dumps(stealth_check, indent=2)}")
+        
+        # List all plugins directly
+        plugins_list = await page.evaluate("""
+            () => {
+                const directPlugins = [];
+                if (navigator.plugins) {
+                    for (let i = 0; i < navigator.plugins.length; i++) {
+                        const p = navigator.plugins[i];
+                        if (p) {
+                            directPlugins.push({
+                                index: i,
+                                name: p.name || 'undefined',
+                                filename: p.filename || 'undefined',
+                                description: p.description || 'undefined',
+                                length: p.length || 0
+                            });
+                        } else {
+                            directPlugins.push({index: i, name: 'null plugin'});
+                        }
+                    }
+                }
+                return directPlugins;
+            }
+        """)
+        
+        print(f"Direct plugins list: {json.dumps(plugins_list, indent=2)}")
+        logger.info(f"Direct plugins list: {json.dumps(plugins_list, indent=2)}")
+        
         result = await page.evaluate("""
             () => {
-                const plugins = Array.from(navigator.plugins).map(p => ({
+                // Helper function to safely convert to array
+                const safeArrayFrom = (collection) => {
+                    // Check if the collection exists and has length
+                    if (!collection || typeof collection.length !== 'number') {
+                        return [];
+                    }
+                    
+                    // Manual conversion if Array.from doesn't work
+                    const result = [];
+                    for (let i = 0; i < collection.length; i++) {
+                        if (collection[i]) {
+                            result.push(collection[i]);
+                        }
+                    }
+                    return result;
+                };
+                
+                const plugins = safeArrayFrom(navigator.plugins).map(p => ({
                     name: p.name,
                     filename: p.filename,
                     description: p.description,
                     length: p.length
                 }));
-                
-                const mimeTypes = Array.from(navigator.mimeTypes).map(mt => ({
+
+                const mimeTypes = safeArrayFrom(navigator.mimeTypes).map(mt => ({
                     type: mt.type,
                     description: mt.description,
                     suffixes: mt.suffixes
                 }));
-                
+
                 return { plugins, mimeTypes };
             }
         """)
-        
+
+        print(f"Plugins emulation results: {json.dumps(result, indent=2)}")
         logger.info(f"Plugins emulation results: {json.dumps(result, indent=2)}")
-        
+
         # Check for standard Chrome plugins
         plugin_names = [p["name"] for p in result["plugins"]]
         assert "Chrome PDF Plugin" in plugin_names, "Missing Chrome PDF Plugin"

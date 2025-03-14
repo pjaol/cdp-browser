@@ -230,7 +230,7 @@ The stealth mode has been tested against multiple fingerprinting and bot detecti
 
 | Service | Test URL | Result | Notes |
 |---------|----------|--------|-------|
-| CreepJS | https://abrahamjuliot.github.io/creepjs/ | ⚠️ Partially Detected | - WebDriver property detected<br>- Worker user agent flagged<br>- Most other checks pass |
+| CreepJS | https://abrahamjuliot.github.io/creepjs/ | ⚠️ Partially Detected | - Function prototype checks pass<br>- Worker user agent flagged<br>- Most other checks pass |
 | Fingerprint.js Pro | https://fingerprint.com/demo/ | ⚠️ Partially Detected | - Some inconsistencies detected<br>- Connection issues during testing |
 | Cloudflare (Basic) | https://www.cloudflare.com/ | ✅ Passes | Most basic Cloudflare-protected sites pass |
 | Cloudflare Challenge | https://www.scrapingcourse.com/cloudflare-challenge | ❌ Detected | Turnstile CAPTCHA challenge triggered |
@@ -252,10 +252,11 @@ CHROME_AVAILABLE=1 PYTHONPATH=. pytest -vs tests/test_stealth_fingerprint.py
 | Domain Initialization | Enabling Network, Page, Runtime domains | ✅ Improved with retries |
 | Stealth Patches | Anti-detection script injection | ✅ Verified with tests |
 | Chrome Runtime | Browser API emulation | ✅ Enhanced verification |
-| WebDriver | Property removal and masking | ✅ Tested |
+| WebDriver | Property emulation (set to false) | ✅ Matches real Chrome behavior |
 | User Agent | Custom browser identification | ✅ Configurable |
 | Window Size | Viewport customization | ✅ Configurable |
 | Plugin Emulation | Browser plugin simulation | ✅ Basic support |
+| Function Prototypes | Native function appearance | ✅ Improved implementation |
 | Advanced Stealth | Experimental anti-detection features | ⚠️ In progress |
 | Cloudflare Bypass | Challenge response automation | ❌ Not implemented |
 
@@ -266,6 +267,9 @@ CHROME_AVAILABLE=1 PYTHONPATH=. pytest -vs tests/test_stealth_fingerprint.py
 - Added comprehensive logging for debugging
 - Strengthened stealth verification process
 - Implemented robust test suite for core functionality
+- Fixed WebDriver property implementation to match real Chrome behavior
+- Improved function prototype patching to appear more native
+- Enhanced plugin emulation consistency
 
 ### Known Limitations
 

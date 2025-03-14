@@ -10,20 +10,27 @@ from . import register_patch
 # Basic WebDriver patch - simple property removal
 register_patch(
     name="webdriver_basic",
-    description="Basic WebDriver property removal",
+    description="Basic WebDriver property emulation - matches real Chrome",
     priority=10,  # Run early
     script="""
     (() => {
-        // Simple property removal
+        // Set webdriver property to false (like real Chrome) instead of removing it
         Object.defineProperty(navigator, 'webdriver', {
-            get: () => undefined,
+            get: () => false,
             configurable: true,
             enumerable: true
         });
         
-        // Delete from prototype if possible
+        // Ensure the property exists on the prototype as well
         try {
-            delete Object.getPrototypeOf(navigator).webdriver;
+            const navigatorProto = Object.getPrototypeOf(navigator);
+            if (!('webdriver' in navigatorProto)) {
+                Object.defineProperty(navigatorProto, 'webdriver', {
+                    get: () => false,
+                    configurable: true,
+                    enumerable: true
+                });
+            }
         } catch (e) {
             // Ignore errors
         }
@@ -51,29 +58,41 @@ register_patch(
             return wrapped;
         };
         
-        // Multiple layers of WebDriver property removal
+        // Multiple layers of WebDriver property protection
         
-        // Layer 1: Delete from prototype
+        // Layer 1: Ensure property exists in prototype
         try {
             const navigatorProto = Object.getPrototypeOf(navigator);
-            if (navigatorProto && 'webdriver' in navigatorProto) {
-                delete navigatorProto.webdriver;
+            if ('webdriver' in navigatorProto) {
+                // If it exists, make sure it returns false
+                Object.defineProperty(navigatorProto, 'webdriver', {
+                    get: makeNativeFunction(function() { return false; }, ''),
+                    configurable: true,
+                    enumerable: true
+                });
+            } else {
+                // If it doesn't exist, add it and make it return false
+                Object.defineProperty(navigatorProto, 'webdriver', {
+                    get: makeNativeFunction(function() { return false; }, ''),
+                    configurable: true,
+                    enumerable: true
+                });
             }
         } catch (e) {
             // Ignore errors
         }
         
-        // Layer 2: Define property on navigator that returns undefined
+        // Layer 2: Define property on navigator that returns false
         try {
             Object.defineProperty(navigator, 'webdriver', {
-                get: makeNativeFunction(function() { return undefined; }, ''),
+                get: makeNativeFunction(function() { return false; }, ''),
                 configurable: true,
                 enumerable: true
             });
         } catch (e) {
             // Fallback if defineProperty fails
             try {
-                navigator.webdriver = undefined;
+                navigator.webdriver = false;
             } catch (e2) {
                 // Ignore errors
             }
@@ -100,13 +119,13 @@ register_patch(
                 const navigatorProxy = new Proxy(navigator, {
                     get: function(target, prop) {
                         if (prop === 'webdriver') {
-                            return undefined;
+                            return false;
                         }
                         return target[prop];
                     },
                     has: function(target, prop) {
                         if (prop === 'webdriver') {
-                            return false;
+                            return true; // Property exists but is false
                         }
                         return prop in target;
                     }
@@ -120,7 +139,8 @@ register_patch(
                     Object.getOwnPropertyDescriptors = function(obj) {
                         const descriptors = originalGetOwnPropertyDescriptors.apply(this, arguments);
                         if (obj === navigator && descriptors.webdriver) {
-                            delete descriptors.webdriver;
+                            // Ensure webdriver descriptor returns false
+                            descriptors.webdriver.get = makeNativeFunction(function() { return false; }, '');
                         }
                         return descriptors;
                     };
@@ -137,7 +157,11 @@ register_patch(
             const originalGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
             Object.getOwnPropertyDescriptor = function(obj, prop) {
                 if (obj === navigator && prop === 'webdriver') {
-                    return undefined;
+                    return {
+                        get: makeNativeFunction(function() { return false; }, ''),
+                        configurable: true,
+                        enumerable: true
+                    };
                 }
                 return originalGetOwnPropertyDescriptor.apply(this, arguments);
             };
@@ -145,27 +169,17 @@ register_patch(
             // Ignore errors
         }
         
-        // Layer 6: Override property detection in Object.keys and other methods
+        // Layer 6: Ensure webdriver is included in Object.keys but returns false
         try {
             const originalObjectKeys = Object.keys;
             Object.keys = function(obj) {
                 const keys = originalObjectKeys.apply(this, arguments);
                 if (obj === navigator) {
-                    return keys.filter(key => key !== 'webdriver');
-                }
-                return keys;
-            };
-            
-            const originalObjectValues = Object.values;
-            Object.values = function(obj) {
-                const values = originalObjectValues.apply(this, arguments);
-                if (obj === navigator && 'webdriver' in obj) {
-                    const index = originalObjectKeys(obj).indexOf('webdriver');
-                    if (index !== -1) {
-                        values.splice(index, 1);
+                    if (!keys.includes('webdriver')) {
+                        keys.push('webdriver');
                     }
                 }
-                return values;
+                return keys;
             };
         } catch (e) {
             // Ignore errors
@@ -219,13 +233,11 @@ register_patch(
             // This is extremely aggressive and may break things
             const navigatorProps = {};
             for (const prop in navigator) {
-                if (prop !== 'webdriver') {
-                    navigatorProps[prop] = navigator[prop];
-                }
+                navigatorProps[prop] = navigator[prop];
             }
             
-            // Add undefined webdriver property
-            navigatorProps.webdriver = undefined;
+            // Set webdriver property to false (like in real Chrome)
+            navigatorProps.webdriver = false;
             
             // Try to redefine navigator (may not work in all browsers)
             Object.defineProperty(window, 'navigator', {

@@ -79,9 +79,9 @@ class StealthBrowser(Browser):
                             {"brand": "Chromium", "version": "121"},
                             {"brand": "Not=A?Brand", "version": "24"}
                         ],
-                        "fullVersion": "121.0.6167.85",
+                        "fullVersion": "121.0.0.0",
                         "platform": "macOS",
-                        "platformVersion": "13.0.0",
+                        "platformVersion": "10.15.7",
                         "architecture": "x86",
                         "model": "",
                         "mobile": False,
@@ -127,15 +127,21 @@ class StealthBrowser(Browser):
             for name, patch in ordered_patches:
                 try:
                     logger.debug(f"Applying patch: {name}")
-                    
+                    logger.debug(f"Patch script: {patch['script'][:100]}...")  # Log the first 100 chars of the script
+
                     # Add the script to evaluate on new document
                     await page.send_command("Page.addScriptToEvaluateOnNewDocument", {
                         "source": patch["script"],
                         "worldName": "main"  # Ensure script runs in main world
                     })
-                    
+
                     # Also evaluate immediately in current context
-                    await page.evaluate(patch["script"])
+                    try:
+                        await page.evaluate(patch["script"])
+                        logger.debug(f"Successfully applied patch: {name}")
+                    except Exception as eval_error:
+                        logger.error(f"Error evaluating patch {name}: {eval_error}")
+                        raise
                     
                     # Verify the patch worked by checking a key property
                     if name == "chrome_runtime_basic":
@@ -148,9 +154,9 @@ class StealthBrowser(Browser):
                         logger.debug(f"Chrome runtime verification: {result}")
                         if not result:
                             raise RuntimeError(f"Failed to initialize Chrome runtime in {name}")
-                    elif name == "webdriver":
-                        result = await page.evaluate("navigator.webdriver === undefined")
-                        logger.debug(f"Navigator verification: {result}")
+                    elif name == "webdriver" or name == "webdriver_basic" or name == "webdriver_advanced":
+                        result = await page.evaluate("navigator.webdriver === false")
+                        logger.debug(f"Navigator verification for {name}: {result}")
                         if not result:
                             raise RuntimeError(f"Failed to patch webdriver in {name}")
                     elif name == "plugins":
@@ -170,7 +176,8 @@ class StealthBrowser(Browser):
                     try {
                         results.chrome = typeof window.chrome === 'object';
                         results.runtime = window.chrome && typeof window.chrome.runtime === 'object';
-                        results.webdriver = navigator.webdriver === undefined;
+                        results.webdriver = navigator.webdriver === false;
+                        results.webdriverExists = 'webdriver' in navigator;
                         results.vendor = navigator.vendor === 'Google Inc.';
                         results.plugins = navigator.plugins.length > 0;
                         results.error = null;
@@ -191,7 +198,9 @@ class StealthBrowser(Browser):
             if not verification.get('runtime'):
                 raise RuntimeError("Chrome runtime not properly initialized")
             if not verification.get('webdriver'):
-                raise RuntimeError("Webdriver property not properly patched")
+                raise RuntimeError("Webdriver property not properly set to false")
+            if not verification.get('webdriverExists'):
+                raise RuntimeError("Webdriver property should exist but is missing")
             
             logger.debug("Successfully applied and verified all stealth patches")
             
@@ -274,7 +283,24 @@ class StealthBrowser(Browser):
         elif patch_type == "user_agent":
             if patch.get("value"):
                 await page.send_command("Network.setUserAgentOverride", {
-                    "userAgent": patch["value"]
+                    "userAgent": patch["value"],
+                    "platform": "MacIntel",
+                    "acceptLanguage": "en-US,en;q=0.9",
+                    "userAgentMetadata": {
+                        "brands": [
+                            {"brand": "Chrome", "version": "121"},
+                            {"brand": "Chromium", "version": "121"},
+                            {"brand": "Not=A?Brand", "version": "24"}
+                        ],
+                        "fullVersion": "121.0.0.0",
+                        "platform": "macOS",
+                        "platformVersion": "10.15.7",
+                        "architecture": "x86",
+                        "model": "",
+                        "mobile": False,
+                        "bitness": "64",
+                        "wow64": False
+                    }
                 })
         elif patch_type == "viewport":
             size = patch.get("size", {})

@@ -54,9 +54,14 @@ register_patch(
                                     }
                                 }
                                 
-                                // Ensure webdriver is completely removed
+                                // Ensure webdriver is correctly set to false (not removed)
                                 try {
-                                    delete Object.getPrototypeOf(iframeNavigator).webdriver;
+                                    const navigatorProto = Object.getPrototypeOf(iframeNavigator);
+                                    Object.defineProperty(navigatorProto, 'webdriver', {
+                                        get: function() { return false; },
+                                        configurable: true,
+                                        enumerable: true
+                                    });
                                 } catch (e) {
                                     // Ignore errors
                                 }
@@ -176,22 +181,25 @@ register_patch(
                             }
                         }
                         
-                        // Ensure webdriver is completely removed
+                        // Ensure webdriver is correctly set to false (not removed)
                         try {
                             const navigatorProto = Object.getPrototypeOf(navigator);
-                            if (navigatorProto && 'webdriver' in navigatorProto) {
-                                delete navigatorProto.webdriver;
+                            if (navigatorProto) {
+                                Object.defineProperty(navigatorProto, 'webdriver', {
+                                    get: function() { return false; },
+                                    configurable: true,
+                                    enumerable: true
+                                });
                             }
-                            
-                            // Define property on navigator that returns false
-                            Object.defineProperty(navigator, 'webdriver', {
-                                get: () => false,
-                                configurable: true,
-                                enumerable: true
-                            });
                         } catch (e) {
                             // Ignore errors
                         }
+                        
+                        Object.defineProperty(navigator, 'webdriver', {
+                            get: function() { return false; },
+                            configurable: true,
+                            enumerable: true
+                        });
                         
                         // Setup chrome object if needed
                         if (!window.chrome) {
@@ -307,9 +315,14 @@ register_patch(
                                         }
                                     }
                                     
-                                    // Ensure webdriver is completely removed
+                                    // Ensure webdriver is correctly set to false (not removed)
                                     try {
-                                        delete Object.getPrototypeOf(iframeNavigator).webdriver;
+                                        const navigatorProto = Object.getPrototypeOf(iframeNavigator);
+                                        Object.defineProperty(navigatorProto, 'webdriver', {
+                                            get: function() { return false; },
+                                            configurable: true,
+                                            enumerable: true
+                                        });
                                     } catch (e) {
                                         // Ignore errors
                                     }
