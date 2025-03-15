@@ -3,6 +3,7 @@
 import pytest
 import logging
 from unittest.mock import MagicMock, patch
+import asyncio
 
 from cdp_browser.browser.stealth.patches.cloudflare_turnstile import CloudflareTurnstilePatch
 
@@ -22,7 +23,9 @@ async def test_turnstile_detection_script_injection():
     """Test that the detection script is injected correctly."""
     # Create mock page object
     mock_page = MagicMock()
-    mock_page.evaluateOnNewDocument = MagicMock(return_value=None)
+    # Configure mock to return an awaitable for async functions
+    mock_page.evaluateOnNewDocument = MagicMock(return_value=asyncio.Future())
+    mock_page.evaluateOnNewDocument.return_value.set_result(None)
     
     # Create the patch
     turnstile_patch = CloudflareTurnstilePatch()
@@ -67,8 +70,16 @@ async def test_apply_executes_all_setup_steps():
     
     # Create patch with mocked methods
     turnstile_patch = CloudflareTurnstilePatch()
-    turnstile_patch._inject_detection_script = MagicMock(return_value=None)
-    turnstile_patch._setup_message_handler = MagicMock(return_value=None)
+    
+    # Create futures for mock async methods
+    inject_future = asyncio.Future()
+    inject_future.set_result(None)
+    setup_future = asyncio.Future()
+    setup_future.set_result(None)
+    
+    # Mock the methods to return the futures
+    turnstile_patch._inject_detection_script = MagicMock(return_value=inject_future)
+    turnstile_patch._setup_message_handler = MagicMock(return_value=setup_future)
     
     # Apply the patch
     result = await turnstile_patch.apply(mock_browser, mock_page)
@@ -84,7 +95,10 @@ async def test_solution_handler_registration():
     """Test that the solution handler is registered correctly."""
     # Create mock page object
     mock_page = MagicMock()
-    mock_page.evaluate = MagicMock(return_value=None)
+    
+    # Configure mock to return an awaitable for async functions
+    mock_page.evaluate = MagicMock(return_value=asyncio.Future())
+    mock_page.evaluate.return_value.set_result(None)
     
     # Create the patch
     turnstile_patch = CloudflareTurnstilePatch()
@@ -106,7 +120,10 @@ async def test_apply_solution():
     """Test applying a solution token."""
     # Create mock page object
     mock_page = MagicMock()
-    mock_page.evaluate = MagicMock(return_value=True)
+    
+    # Configure mock to return an awaitable for async functions
+    mock_page.evaluate = MagicMock(return_value=asyncio.Future())
+    mock_page.evaluate.return_value.set_result(True)
     
     # Create the patch
     turnstile_patch = CloudflareTurnstilePatch()
@@ -130,7 +147,10 @@ async def test_is_detected():
     """Test checking if Turnstile is detected."""
     # Create mock page object
     mock_page = MagicMock()
-    mock_page.evaluate = MagicMock(return_value={"detected": True, "type": "standalone"})
+    
+    # Configure mock to return an awaitable for async functions
+    mock_page.evaluate = MagicMock(return_value=asyncio.Future())
+    mock_page.evaluate.return_value.set_result({"detected": True, "type": "standalone"})
     
     # Create the patch
     turnstile_patch = CloudflareTurnstilePatch()

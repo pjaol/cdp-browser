@@ -10,6 +10,7 @@ import logging
 from typing import Dict, Optional
 
 from cdp_browser.browser.stealth.patches.base import BasePatch
+from . import register_patch
 
 logger = logging.getLogger(__name__)
 
@@ -43,14 +44,15 @@ class CloudflareTurnstilePatch(BasePatch):
         # Log that we've applied the patch
         logger.info("Applied Cloudflare Turnstile detection patch")
         return True
-
-    async def _inject_detection_script(self, page):
-        """Inject the detection script into the page.
-        
-        This script detects the presence of Cloudflare Turnstile and intercepts
-        its parameters.
+    
+    def get_script(self):
         """
-        detection_script = """
+        Get the detection script for the patch.
+        
+        Returns:
+            str: The JavaScript code for detection
+        """
+        return """
         (function() {
             // Store any console.clear calls to prevent them from hiding valuable info
             console.originalClear = console.clear;
@@ -173,8 +175,57 @@ class CloudflareTurnstilePatch(BasePatch):
                 childList: true,
                 subtree: true
             });
+            
+            // Set up solution handling
+            window._cdp_apply_turnstile_solution = function(token) {
+                if (!window._cdp_turnstile) {
+                    console.error('No Turnstile challenge detected to solve');
+                    return false;
+                }
+                
+                try {
+                    if (window._cdp_turnstile.type === 'standalone' && window._cdp_turnstile_callback) {
+                        // For standalone Turnstile, call the callback with the token
+                        window._cdp_turnstile_callback(token);
+                        window._cdp_turnstile.solved = true;
+                        window._cdp_turnstile.token = token;
+                        console.log('CDP-TURNSTILE-SOLVED:standalone');
+                        return true;
+                    } else if (window._cdp_turnstile.type === 'challenge_page') {
+                        // For challenge page, find the form input and submit
+                        const input = document.querySelector('[name="cf-turnstile-response"]');
+                        if (input) {
+                            input.value = token;
+                            
+                            // Try to find and click the submit button
+                            const form = input.closest('form');
+                            if (form) {
+                                form.submit();
+                                window._cdp_turnstile.solved = true;
+                                window._cdp_turnstile.token = token;
+                                console.log('CDP-TURNSTILE-SOLVED:challenge_page');
+                                return true;
+                            }
+                        }
+                    }
+                    
+                    console.error('Could not apply Turnstile solution');
+                    return false;
+                } catch (error) {
+                    console.error('Error applying Turnstile solution:', error);
+                    return false;
+                }
+            };
         })();
         """
+
+    async def _inject_detection_script(self, page):
+        """Inject the detection script into the page.
+        
+        This script detects the presence of Cloudflare Turnstile and intercepts
+        its parameters.
+        """
+        detection_script = self.get_script()
         await page.evaluateOnNewDocument(detection_script)
 
     async def _setup_message_handler(self, page):
@@ -283,5 +334,14 @@ class CloudflareTurnstilePatch(BasePatch):
 
 
 def register():
-    """Register the Cloudflare Turnstile patch."""
-    return CloudflareTurnstilePatch() 
+    """Register the Cloudflare Turnstile patch with class-based approach."""
+    return CloudflareTurnstilePatch()
+
+
+# Register the script-based patch for compatibility with existing system
+register_patch(
+    name="cloudflare_turnstile_compat",
+    description="Detects and handles Cloudflare Turnstile challenges (compatibility mode)",
+    priority=20,  # Run before most other patches but after core functionality patches
+    script=CloudflareTurnstilePatch().get_script()
+) 
