@@ -7,7 +7,10 @@ anti-bot mechanisms used by Cloudflare-protected websites.
 
 import json
 import logging
-from typing import Dict, Optional
+import random
+import asyncio
+import math
+from typing import Dict, Optional, Tuple, List
 
 from cdp_browser.browser.stealth.patches.base import BasePatch
 from . import register_patch
@@ -145,6 +148,69 @@ class CloudflareTurnstilePatch(BasePatch):
                 }
             }, 50);
             
+            // Detect Turnstile checkbox challenges directly
+            const findTurnstileCheckbox = () => {
+                // Common selectors for Turnstile checkbox
+                const selectors = [
+                    'iframe[src*="challenges.cloudflare.com"]',
+                    'iframe[src*="turnstile"]',
+                    'iframe.cf-turnstile',
+                    'div[class*="turnstile"]',
+                    'div[data-sitekey]'
+                ];
+                
+                for (const selector of selectors) {
+                    const element = document.querySelector(selector);
+                    if (element) {
+                        // Get iframe position and size if found
+                        if (element.tagName === 'IFRAME') {
+                            const rect = element.getBoundingClientRect();
+                            if (!window._cdp_turnstile) {
+                                window._cdp_turnstile = { 
+                                    type: 'checkbox', 
+                                    detected: true,
+                                    frameId: element.id || '',
+                                    position: {
+                                        x: rect.left,
+                                        y: rect.top,
+                                        width: rect.width,
+                                        height: rect.height,
+                                        centerX: rect.left + rect.width / 2,
+                                        centerY: rect.top + rect.height / 2
+                                    }
+                                };
+                                console.log('CDP-TURNSTILE-DETECTED:' + JSON.stringify(window._cdp_turnstile));
+                            }
+                            return true;
+                        } 
+                        
+                        // For non-iframe elements
+                        const rect = element.getBoundingClientRect();
+                        if (!window._cdp_turnstile) {
+                            window._cdp_turnstile = { 
+                                type: 'checkbox', 
+                                detected: true,
+                                elementId: element.id || '',
+                                position: {
+                                    x: rect.left,
+                                    y: rect.top,
+                                    width: rect.width,
+                                    height: rect.height,
+                                    centerX: rect.left + rect.width / 2,
+                                    centerY: rect.top + rect.height / 2
+                                }
+                            };
+                            console.log('CDP-TURNSTILE-DETECTED:' + JSON.stringify(window._cdp_turnstile));
+                        }
+                        return true;
+                    }
+                }
+                return false;
+            };
+            
+            // Look for Turnstile checkboxes initially
+            findTurnstileCheckbox();
+            
             // Listen for any new DOM changes that might indicate Turnstile
             const observer = new MutationObserver((mutations) => {
                 for (const mutation of mutations) {
@@ -156,13 +222,25 @@ class CloudflareTurnstilePatch(BasePatch):
                         
                         if (iframe) {
                             if (!window._cdp_turnstile) {
+                                const rect = iframe.getBoundingClientRect();
                                 window._cdp_turnstile = { 
                                     type: 'iframe', 
                                     detected: true,
-                                    src: iframe.src
+                                    src: iframe.src,
+                                    position: {
+                                        x: rect.left,
+                                        y: rect.top,
+                                        width: rect.width,
+                                        height: rect.height,
+                                        centerX: rect.left + rect.width / 2,
+                                        centerY: rect.top + rect.height / 2
+                                    }
                                 };
                                 console.log('CDP-TURNSTILE-DETECTED:' + JSON.stringify(window._cdp_turnstile));
                             }
+                        } else {
+                            // Check for non-iframe Turnstile components
+                            findTurnstileCheckbox();
                         }
                     }
                 }
@@ -246,10 +324,18 @@ class CloudflareTurnstilePatch(BasePatch):
                     if not self.callback_registered:
                         await self._register_solution_handler(page)
                         self.callback_registered = True
+                        
+                    # Auto-solve if we have position data
+                    if 'position' in data and data.get('type') in ['checkbox', 'iframe']:
+                        logger.info("Attempting auto-solve for Turnstile checkbox")
+                        await self.solve_turnstile_challenge(page, data)
+                        
                 except json.JSONDecodeError:
                     logger.error(f"Failed to parse Turnstile detection data: {json_str}")
             elif "CDP-TURNSTILE-INTERCEPTED" in text:
                 logger.info("Successfully intercepted Turnstile render function")
+            elif "CDP-TURNSTILE-SOLVED:" in text:
+                logger.info(f"Cloudflare Turnstile solved: {text.split('CDP-TURNSTILE-SOLVED:')[1]}")
 
         # Register the console message handler
         page.on("console", handle_console_message)
@@ -331,6 +417,187 @@ class CloudflareTurnstilePatch(BasePatch):
         }
         """)
         return result
+
+    async def solve_turnstile_challenge(self, page, challenge_data: Dict) -> bool:
+        """Attempt to solve a Turnstile challenge using human-like interactions.
+        
+        Args:
+            page: The page with the Turnstile challenge
+            challenge_data: The detected challenge parameters
+            
+        Returns:
+            bool: True if the solution was successful, False otherwise
+        """
+        logger.info(f"Attempting to solve Turnstile challenge type: {challenge_data.get('type')}")
+        
+        if 'position' not in challenge_data:
+            logger.warning("No position data available for Turnstile challenge")
+            return False
+        
+        position = challenge_data['position']
+        center_x = position.get('centerX', position.get('x', 0) + position.get('width', 0) / 2)
+        center_y = position.get('centerY', position.get('y', 0) + position.get('height', 0) / 2)
+        
+        # Simulate natural mouse movement
+        try:
+            await self._move_mouse_like_human(page, center_x, center_y)
+            
+            # Slight pause before clicking (natural human behavior)
+            await asyncio.sleep(random.uniform(0.1, 0.3))
+            
+            # Click the checkbox
+            await page.mouse.click(center_x, center_y)
+            
+            logger.info(f"Clicked on Turnstile challenge at ({center_x}, {center_y})")
+            
+            # Wait for any animations or state changes
+            await asyncio.sleep(random.uniform(0.5, 1.0))
+            
+            # Check if our click worked by looking for success indicators
+            is_solved = await self._check_turnstile_solved(page)
+            
+            if is_solved:
+                logger.info("Successfully solved Turnstile challenge with human-like interaction")
+                return True
+            else:
+                logger.warning("Turnstile challenge not solved after click, may require additional interaction")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error while solving Turnstile challenge: {e}")
+            return False
+
+    async def _move_mouse_like_human(self, page, target_x: float, target_y: float, steps: int = None):
+        """Move the mouse in a human-like pattern to the target coordinates.
+        
+        Args:
+            page: The page to interact with
+            target_x: The x coordinate to move to
+            target_y: The y coordinate to move to
+            steps: Number of steps (if None, calculated based on distance)
+        """
+        # Get current mouse position
+        current_position = await page.evaluate("""
+        () => {
+            return {x: 0, y: 0}; // Default to (0,0) if we can't get current position
+        }
+        """)
+        
+        start_x = current_position.get('x', 0)
+        start_y = current_position.get('y', 0)
+        
+        # Calculate distance
+        distance = ((target_x - start_x) ** 2 + (target_y - start_y) ** 2) ** 0.5
+        
+        # If steps not provided, calculate based on distance
+        if steps is None:
+            steps = max(10, min(25, int(distance / 10)))
+        
+        # Generate a slightly curved path with varying speeds
+        points = self._generate_human_mouse_path(start_x, start_y, target_x, target_y, steps)
+        
+        # Move through the path
+        for i, (x, y, delay) in enumerate(points):
+            await page.mouse.move(x, y)
+            
+            # Variable delay based on position in the path (slower at start and end)
+            if i < len(points) - 1:
+                await asyncio.sleep(delay)
+
+    def _generate_human_mouse_path(self, start_x: float, start_y: float, 
+                                   end_x: float, end_y: float, 
+                                   steps: int) -> List[Tuple[float, float, float]]:
+        """Generate a mouse path that mimics human movement.
+        
+        Args:
+            start_x: Starting x coordinate
+            start_y: Starting y coordinate
+            end_x: Ending x coordinate
+            end_y: Ending y coordinate
+            steps: Number of points in the path
+            
+        Returns:
+            List of (x, y, delay) tuples representing points along the path
+        """
+        path = []
+        
+        # Add some randomness to the path (slight curve)
+        # Bezier curve implementation would be best, but this is a simple approximation
+        for i in range(steps + 1):
+            # Progress along the path (0.0 to 1.0)
+            t = i / steps
+            
+            # Ease-in-out timing function (slower at start and end)
+            # This makes the movement more natural
+            if t < 0.5:
+                progress = 2 * t * t
+            else:
+                progress = -1 + (4 - 2 * t) * t
+                
+            # Linear interpolation with slight random deviation
+            deviation_x = random.uniform(-5, 5) * math.sin(t * math.pi)
+            deviation_y = random.uniform(-5, 5) * math.sin(t * math.pi)
+            
+            # Calculate point on path
+            x = start_x + (end_x - start_x) * progress + deviation_x
+            y = start_y + (end_y - start_y) * progress + deviation_y
+            
+            # Variable speed (slower at beginning and end)
+            if i < steps / 4 or i > steps * 3 / 4:
+                delay = random.uniform(0.01, 0.03)  # Slower
+            else:
+                delay = random.uniform(0.005, 0.01)  # Faster
+                
+            path.append((x, y, delay))
+            
+        return path
+
+    async def _check_turnstile_solved(self, page) -> bool:
+        """Check if the Turnstile challenge has been solved.
+        
+        Args:
+            page: The page with the Turnstile challenge
+            
+        Returns:
+            bool: True if solved, False otherwise
+        """
+        # Different ways to check if the challenge was solved
+        result = await page.evaluate("""
+        () => {
+            // Check if we have a solved flag in our detection
+            if (window._cdp_turnstile && window._cdp_turnstile.solved) {
+                return {solved: true, method: 'flag'};
+            }
+            
+            // Check for successful callback execution
+            if (window._cdp_turnstile_callback && window._cdp_turnstile.token) {
+                return {solved: true, method: 'callback'};
+            }
+            
+            // Check if we're no longer on a challenge page
+            if (window._cf_chl_opt && window._cf_chl_opt.chlStatus === 'passed') {
+                return {solved: true, method: 'status'};
+            }
+            
+            // Look for success indicators in the DOM
+            const successIndicators = [
+                // No longer showing challenge elements
+                !document.querySelector('iframe[src*="challenges.cloudflare.com"]'),
+                !document.querySelector('iframe[src*="turnstile"]'),
+                document.querySelector('.cf-turnstile-success'),
+                document.querySelector('.turnstile-success')
+            ];
+            
+            if (successIndicators.some(Boolean)) {
+                return {solved: true, method: 'dom'};
+            }
+            
+            return {solved: false};
+        }
+        """)
+        
+        logger.debug(f"Turnstile solution check result: {result}")
+        return result.get('solved', False)
 
 
 def register():

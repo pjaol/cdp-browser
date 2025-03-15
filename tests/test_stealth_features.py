@@ -529,14 +529,58 @@ async def test_cloudflare_turnstile_detection(stealth_browser):
         # Note: This is a test site that may change over time
         await page.goto("https://nowsecure.nl/")
         
+        # Allow some time for the page to load and scripts to execute
+        await asyncio.sleep(5)
+        
         # Check if Turnstile is detected
         detection_result = await cf_patch.is_detected(page)
         
         # Log the detection result
         logger.info(f"Cloudflare Turnstile detection result: {json.dumps(detection_result, indent=2)}")
         
-        # The test is marked as xfail, so we're just logging the result
-        # In a real test, we would assert detection_result.get("detected", False) is True
+        # Verify that detection found Turnstile
+        assert detection_result.get("detected", False) is True, "Failed to detect Cloudflare Turnstile"
+        
+        # Check if position data is available for human-like interaction
+        if "position" in detection_result:
+            logger.info("Position data available for automated solving")
+            logger.info(f"Position: {detection_result['position']}")
+            
+            # We'll try to solve it using our human-like interaction method
+            success = await cf_patch.solve_turnstile_challenge(page, detection_result)
+            
+            # Log the result but don't assert (since it's an xfailed test)
+            if success:
+                logger.info("Successfully solved Turnstile challenge with human-like interaction")
+            else:
+                logger.warning("Could not solve Turnstile challenge automatically")
+                
+            # Take a screenshot to verify visually
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            os.makedirs("test_results", exist_ok=True)
+            screenshot_path = f"test_results/turnstile_test_{timestamp}.png"
+            
+            await page.screenshot({"path": screenshot_path})
+            logger.info(f"Screenshot saved to {screenshot_path}")
+        else:
+            logger.warning("No position data available for human-like interaction")
+        
+        # Get page content to verify test is actually testing against Turnstile
+        try:
+            html_content = await page.evaluate("() => document.documentElement.outerHTML")
+            detection_indicators = [
+                "turnstile", "cloudflare", "cf-challenge", "security check"
+            ]
+            
+            found_indicators = [indicator for indicator in detection_indicators 
+                               if indicator in html_content.lower()]
+            
+            if found_indicators:
+                logger.info(f"Found Cloudflare indicators in page content: {found_indicators}")
+            else:
+                logger.warning("No Cloudflare indicators found in page content - test site may have changed")
+        except Exception as e:
+            logger.error(f"Error getting page content: {e}")
     finally:
         # Clean up
         await page.close()

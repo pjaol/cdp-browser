@@ -766,6 +766,18 @@ async def test_cloudflare_specific_challenge(advanced_stealth_browser):
     print("Applying advanced stealth patches...")
     await apply_advanced_stealth_patches(advanced_stealth_browser)
     
+    # Check if the Cloudflare Turnstile patch is registered
+    cf_patch = None
+    for patch in advanced_stealth_browser.stealth.patches:
+        if patch.NAME == "cloudflare_turnstile":
+            cf_patch = patch
+            break
+    
+    if cf_patch:
+        print("Cloudflare Turnstile patch found, will attempt automatic solving")
+    else:
+        print("Cloudflare Turnstile patch not found, proceeding without automatic solving")
+    
     print("Creating page...")
     page = await advanced_stealth_browser.create_page()
     
@@ -780,7 +792,9 @@ async def test_cloudflare_specific_challenge(advanced_stealth_browser):
         "botDetection": {
             "detected": False,
             "indicators": []
-        }
+        },
+        "automaticSolvingAttempted": False,
+        "automaticSolvingSuccess": False
     }
     
     try:
@@ -895,6 +909,37 @@ async def test_cloudflare_specific_challenge(advanced_stealth_browser):
         except Exception as url_error:
             print(f"❌ Error getting current URL: {url_error}")
             logger.error(f"Error getting current URL: {url_error}")
+        
+        # Attempt automatic solving if Cloudflare Turnstile patch is available
+        if cf_patch and challenge_detected:
+            print("Attempting to detect and solve challenge automatically...")
+            cloudflare_results["automaticSolvingAttempted"] = True
+            
+            try:
+                # Check if Turnstile is detected
+                detection_result = await cf_patch.is_detected(page)
+                print(f"Turnstile detection result: {detection_result}")
+                
+                # If detected properly, attempt to solve
+                if detection_result.get("detected", False):
+                    print("Turnstile detected, attempting to solve...")
+                    
+                    if "position" in detection_result:
+                        print(f"Position data found: {detection_result['position']}")
+                        success = await cf_patch.solve_turnstile_challenge(page, detection_result)
+                        
+                        if success:
+                            print("✅ Automatic Cloudflare challenge solving succeeded!")
+                            cloudflare_results["automaticSolvingSuccess"] = True
+                        else:
+                            print("❌ Automatic Cloudflare challenge solving failed")
+                    else:
+                        print("❌ No position data available for solving")
+                else:
+                    print("❌ Turnstile not properly detected, cannot solve automatically")
+            except Exception as solve_error:
+                print(f"❌ Error during automatic solving: {solve_error}")
+                logger.error(f"Error during automatic solving: {solve_error}")
         
         # Wait longer for Cloudflare challenge to complete
         print("Waiting for Cloudflare challenge to complete...")
