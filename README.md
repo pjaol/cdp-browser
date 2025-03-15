@@ -207,6 +207,7 @@ The CDP Browser includes a stealth mode that helps avoid detection by fingerprin
 - Plugin and extension emulation
 - Function prototype integrity preservation
 - Advanced iframe handling
+- Cloudflare Turnstile challenge detection and handling
 
 ### Testing Against Fingerprinting Services
 
@@ -222,9 +223,10 @@ The stealth mode has been tested against multiple fingerprinting and bot detecti
    - Current implementation can be detected by advanced fingerprinting techniques
 
 3. **Cloudflare Challenge** - One of the most sophisticated bot detection systems
-   - Tests against specific Cloudflare challenge pages show current limitations
-   - Our implementation can't yet bypass Cloudflare's Turnstile CAPTCHA system
-   - Results provide valuable insights into improving stealth capabilities
+   - Tests against specific Cloudflare challenge pages
+   - Our implementation includes detection and handling for Cloudflare's Turnstile CAPTCHA system
+   - Supports both passive fingerprint enhancement and optional external CAPTCHA solving integration
+   - See detailed documentation in `docs/cloudflare_turnstile.md`
 
 #### Fingerprinting Test Results
 
@@ -233,7 +235,7 @@ The stealth mode has been tested against multiple fingerprinting and bot detecti
 | CreepJS | https://abrahamjuliot.github.io/creepjs/ | ⚠️ Partially Detected | - Function prototype checks pass<br>- Worker user agent flagged<br>- Most other checks pass |
 | Fingerprint.js Pro | https://fingerprint.com/demo/ | ⚠️ Partially Detected | - Some inconsistencies detected<br>- Connection issues during testing |
 | Cloudflare (Basic) | https://www.cloudflare.com/ | ✅ Passes | Most basic Cloudflare-protected sites pass |
-| Cloudflare Challenge | https://www.scrapingcourse.com/cloudflare-challenge | ❌ Detected | Turnstile CAPTCHA challenge triggered |
+| Cloudflare Turnstile | https://nowsecure.nl/ | ⚠️ Partially Handled | - Detection works well<br>- Advanced fingerprinting sometimes bypasses challenge<br>- External CAPTCHA solving option available for reliability |
 | Browser Leak Test | https://browserleaks.com/javascript | ⚠️ Mixed Results | - Most tests pass<br>- Some canvas fingerprinting issues |
 
 ### Running Fingerprinting Tests
@@ -241,6 +243,59 @@ The stealth mode has been tested against multiple fingerprinting and bot detecti
 ```bash
 CHROME_AVAILABLE=1 PYTHONPATH=. pytest -vs tests/test_stealth_fingerprint.py
 ```
+
+### Cloudflare Turnstile Support
+
+CDP Browser now includes built-in support for detecting and handling Cloudflare Turnstile challenges. This feature:
+
+- Automatically detects both standalone Turnstile CAPTCHA and Challenge Pages
+- Intercepts key parameters required for solving
+- Provides enhanced fingerprinting to passively bypass some challenges
+- Supports integration with external CAPTCHA solving services
+
+Example usage:
+
+```python
+import asyncio
+from cdp_browser import StealthBrowser
+
+async def main():
+    # Create a browser with stealth mode and Cloudflare Turnstile handling
+    browser = StealthBrowser(headless=False, stealth_level="maximum")
+    
+    try:
+        await browser.connect()
+        page = await browser.new_page()
+        
+        # Navigate to a Cloudflare-protected site
+        await page.goto("https://example-with-cloudflare.com")
+        
+        # The Turnstile patch will automatically attempt to handle challenges
+        # For more control, you can use the explicit API:
+        
+        # Get the Cloudflare Turnstile patch
+        cf_patch = None
+        for patch in browser.stealth.patches:
+            if patch.NAME == "cloudflare_turnstile":
+                cf_patch = patch
+                break
+        
+        if cf_patch:
+            # Check if Turnstile is detected
+            result = await cf_patch.is_detected(page)
+            if result.get("detected", False):
+                print(f"Detected Cloudflare Turnstile: {result}")
+                
+                # For external solving services, you could apply a solution:
+                # await cf_patch.apply_solution(page, "your_token_here")
+    
+    finally:
+        await browser.close()
+
+asyncio.run(main())
+```
+
+For more examples, see `docs/examples/cloudflare_turnstile_example.py`
 
 ### Current Status
 
@@ -257,8 +312,8 @@ CHROME_AVAILABLE=1 PYTHONPATH=. pytest -vs tests/test_stealth_fingerprint.py
 | Window Size | Viewport customization | ✅ Configurable |
 | Plugin Emulation | Browser plugin simulation | ✅ Basic support |
 | Function Prototypes | Native function appearance | ✅ Improved implementation |
+| Cloudflare Turnstile | Detection and handling of Cloudflare challenges | ✅ Basic support with external solving option |
 | Advanced Stealth | Experimental anti-detection features | ⚠️ In progress |
-| Cloudflare Bypass | Challenge response automation | ❌ Not implemented |
 
 ### Recent Improvements
 

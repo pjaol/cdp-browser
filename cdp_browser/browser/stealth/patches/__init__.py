@@ -41,6 +41,7 @@ from .worker import *
 from .iframe import *
 from .canvas import *
 from .webgl import *
+from .cloudflare_turnstile import *
 
 logger.debug(f"Available patches: {list(PATCHES.keys())}")
 
